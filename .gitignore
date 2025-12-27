@@ -1,0 +1,70 @@
+# Visual Studio / .NET Core
+.vs/
+.vscode/
+bin/
+obj/
+**/bin/
+**/obj/
+[Bb]in/
+[Oo]bj/
+
+# Build results
+artifacts/
+publish/
+dist/
+*.dll
+*.exe
+*.pdb
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+packages.config
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# User-specific files
+*.user
+*.userosscache
+*.suo
+*.userprefs
+*.sln.docstates
+
+# Logs, databases, caches
+*.log
+*.sqlite
+*.db
+*.cache
+TestResults/
+coverage/
+coverage.opencover.xml
+
+# VS Code settings and local secrets
+.vscode/
+.env
+.env.*.local
+secrets.json
+
+# Node / frontend
+node_modules/
+wwwroot/lib/
+bower_components/
+ClientApp/node_modules/
+npm-debug.log
+yarn-error.log
+.pnp.*
+
+# Misc
+*.vsix
+*.dbmdl
+*.bak
+*.tmp
+*.orig
+*.DS_Store
+Thumbs.db
