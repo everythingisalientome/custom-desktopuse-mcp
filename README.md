@@ -51,7 +51,7 @@ Create or update `.vscode/mcp.json` in your workspace:
         }
     }
 }
-
+```
 Ideas Help: 
 1. https://www.youtube.com/watch?v=MKD-sCZWpZQ
 2. https://learn.microsoft.com/en-us/nuget/concepts/nuget-mcp-server
