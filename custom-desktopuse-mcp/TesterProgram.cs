@@ -17,10 +17,10 @@ namespace TesterApp
 
             //for WPF applications the field Name is usually the x:Name property is treated as AutomationId in FlaUI so we need to pass as ID
             service.ClickElement("id", "emailTextBox");
-            service.TypeText("id", "emailTextBox", "preet.panda@outlook.com");
+            service.WriteText("id", "emailTextBox", "preet.panda@outlook.com");
 
             service.ClickElement("id", "employeeNumberTextBox");
-            service.TypeText("id", "employeeNumberTextBox", "12345");
+            service.SendKeys("id", "employeeNumberTextBox", "12345");
 
             service.SelectItems("id", "costCenterTextBox", "Marketing");
 

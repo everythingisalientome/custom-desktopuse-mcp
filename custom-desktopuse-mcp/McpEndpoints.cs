@@ -15,84 +15,92 @@ namespace DesktopMcpServer
             return service.LaunchApp(path);
         }
 
-        // Tool: GetWindowTree 
-        [McpServerTool(Name = "GetWindowTree")]
-        [Description("Finds a window by title and returns a simplified JSON tree.")]
-        public static string GetWindowTree(string windowTitle, DesktopAutomationService service)
-        {
-            return service.GetWindowTree(windowTitle);
-        }
-
-        // Tool: ClickElement
-        [McpServerTool(Name = "ClickElement")]
-        [Description("Finds a UI element and clicks it.")]
-        public static string ClickElement(string criteria, string value, DesktopAutomationService service)
-        {
-            return service.ClickElement(criteria, value);
-        }
-
-        // Tool: RightClickElement
-        [McpServerTool(Name = "RightClickElement")]
-        [Description("Finds a UI element and performs a right-click (context menu).")]
-        public static string RightClickElement(string criteria, string value, DesktopAutomationService service)
-        {
-            return service.RightClickElement(criteria, value);
-        }
-
-        // Tool: TypeText (Renamed/Refined)
-        [McpServerTool(Name = "TypeText")]
-        [Description("Finds an edit field and types text into it.")]
-        public static string TypeText(string criteria, string value, string text, DesktopAutomationService service)
-        {
-            return service.TypeText(criteria, value, text);
-        }
-
-        // Tool: GetText
-        [McpServerTool(Name = "GetText")]
-        [Description("Reads the text content from a UI element.")]
-        public static string GetText(string criteria, string value, DesktopAutomationService service)
-        {
-            return service.GetText(criteria, value);
-        }
-
-        // Tool: SendKeys (Global keys)
-        [McpServerTool(Name = "SendKeys")]
-        [Description("Sends global keystrokes to the currently focused window (e.g., '{ENTER}', '^c').")]
-        public static string SendKeys(string keys, DesktopAutomationService service)
-        {
-            return service.SendKeys(keys);
-        }
-
-        // Tool: SelectItems
-        [McpServerTool(Name = "SelectItems")]
-        [Description("Selects one or more items from a dropdown, combo box, or list. Provide multiple items separated by commas.")]
-        public static string SelectItems(string criteria, string value, string items, DesktopAutomationService service)
-        {
-            return service.SelectItems(criteria, value, items);
-        }
-
-        // Tool: SetCheckbox
-        [McpServerTool(Name = "SetCheckbox")]
-        [Description("Sets a checkbox to checked (true/on) or unchecked (false/off).")]
-        public static string SetCheckbox(string criteria, string value, string state, DesktopAutomationService service)
-        {
-            return service.SetCheckbox(criteria, value, state);
-        }
-
-        // Tool: SelectRadioButton
-        [McpServerTool(Name = "SelectRadioButton")]
-        [Description("Selects a specific radio button option.")]
-        public static string SelectRadioButton(string criteria, string value, DesktopAutomationService service)
-        {
-            return service.SelectRadioButton(criteria, value);
-        }
-
         // Tool: CloseApp
         [McpServerTool(Name = "CloseApp")]
         [Description("Closes the currently running application.")]
         public static string CloseApp(DesktopAutomationService service)
         {
             return service.CloseApp();
+        }
+
+        // Tool: GetWindowTree
+        [McpServerTool(Name = "GetWindowTree")]
+        [Description("Finds a window by Title, ID, or Name and returns a JSON tree. Use 'current' for active window.")]
+        public static string GetWindowTree(string fieldName, DesktopAutomationService service)
+        {
+            return service.GetWindowTree(fieldName);
+        }
+
+        // Tool: ClickElement
+        [McpServerTool(Name = "ClickElement")]
+        [Description("Finds an element by ID, Name, Class, or Role and clicks it.")]
+        public static string ClickElement(string fieldName, string? windowName, DesktopAutomationService service)
+        {
+            return service.ClickElement(fieldName, windowName);
+        }
+
+        // Tool: RightClickElement
+        [McpServerTool(Name = "RightClickElement")]
+        [Description("Finds an element by ID, Name, Class, or Role and right-clicks it.")]
+        public static string RightClickElement(string fieldName, string? windowName, DesktopAutomationService service)
+        {
+            return service.RightClickElement(fieldName, windowName);
+        }
+
+        // Tool: WriteText
+        [McpServerTool(Name = "WriteText")]
+        [Description("Writes text to a field. Optionally sends special keys (e.g. '^a{DELETE}') first.")]
+        public static string WriteText(string fieldName, string value, string? specialKeys, string? windowName, DesktopAutomationService service)
+        {
+            return service.WriteText(fieldName, value, specialKeys, windowName);
+        }
+
+        // Tool: GetText
+        [McpServerTool(Name = "GetText")]
+        [Description("Reads text from an element found by ID, Name, Class, or Role.")]
+        public static string GetText(string fieldName, string? windowName, DesktopAutomationService service)
+        {
+            return service.GetText(fieldName, windowName);
+        }
+
+        // Tool: SendKeys (Human-Like)
+        [McpServerTool(Name = "SendKeys")]
+        [Description("Types text slowly, character-by-character with random delays, to simulate a human user.")]
+        public static string SendKeys(string fieldName, string value, string? windowName, DesktopAutomationService service)
+        {
+            return service.SendKeys(fieldName, value, windowName);
+        }
+
+        // Tool: SelectItems
+        [McpServerTool(Name = "SelectItems")]
+        [Description("Selects items in a dropdown or list. 'fieldName' is the list/combo, 'value' is comma-separated items.")]
+        public static string SelectItems(string fieldName, string value, string? windowName, DesktopAutomationService service)
+        {
+            return service.SelectItems(fieldName, value, windowName);
+        }
+
+        // Tool: SetCheckbox
+        [McpServerTool(Name = "SetCheckbox")]
+        [Description("Sets a checkbox. 'fieldName' is the checkbox, 'value' is 'on', 'true', or 'off'.")]
+        public static string SetCheckbox(string fieldName, string value, string? windowName, DesktopAutomationService service)
+        {
+            return service.SetCheckbox(fieldName, value, windowName);
+        }
+
+        // Tool: SelectRadioButton
+        [McpServerTool(Name = "SelectRadioButton")]
+        [Description("Selects a radio button. 'fieldName' is the button Name/ID.")]
+        public static string SelectRadioButton(string fieldName, string value, string? windowName, DesktopAutomationService service)
+        {
+            return service.SelectRadioButton(fieldName, value, windowName);
+        }
+
+        // Tool: SendSpecialKeys
+        [McpServerTool(Name = "SendSpecialKeys")]
+        [Description("Sends global keystrokes (e.g. '{ENTER}', '^c') to the focused window.")]
+        public static string SendSpecialKeys(string specialKeys, DesktopAutomationService service)
+        {
+            return service.SendSpecialKeys(specialKeys);
         }
     }
 }
