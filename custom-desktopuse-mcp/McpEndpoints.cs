@@ -108,9 +108,9 @@ namespace DesktopMcpServer
         // Tool: SendSpecialKeys
         [McpServerTool(Name = "SendSpecialKeys")]
         [Description("Sends global keystrokes (e.g. '{ENTER}', '^c') to the focused window.")]
-        public static string SendSpecialKeys(string specialKeys, DesktopAutomationService service)
+        public static string SendSpecialKeys(string specialKeys, string? windowName, DesktopAutomationService service)
         {
-            return service.SendSpecialKeys(specialKeys);
+            return service.SendSpecialKeys(specialKeys, windowName);
         }
     }
 }

@@ -113,6 +113,27 @@ namespace DesktopMcpServer
                 var element = SmartFindElement(fieldName, windowName);
                 if (element == null) return $"Error: Element not found '{fieldName}' in window '{windowName ?? "Current"}'";
 
+                //Adding logic to improve reliability of clicks
+                // FIX 1: Handle Offscreen Elements (e.g. at bottom of a list)
+                if (element.IsOffscreen)
+                {
+                    if (element.Patterns.ScrollItem.TryGetPattern(out var scrollPattern))
+                    {
+                        scrollPattern.ScrollIntoView();
+                    }
+                }
+
+                // FIX 2: Wait for Animation (e.g. Combobox sliding down)
+                // This prevents clicking "air" while the UI is still fading in
+                try 
+                { 
+                    element.WaitUntilClickable(TimeSpan.FromSeconds(2)); 
+                } 
+                catch {}
+
+                // FIX 3: Ensure Focus
+                element.SetForeground();
+
                 if (element.Patterns.Invoke.TryGetPattern(out var invokePattern))
                 {
                     invokePattern.Invoke();
@@ -181,11 +202,31 @@ namespace DesktopMcpServer
             catch (Exception ex) { return $"Error reading text: {ex.Message}"; }
         }
 
-        public string SendSpecialKeys(string specialKeys)
+        public string SendSpecialKeys(string specialKeys, string? windowName = null)
         {
             try
             {
-                Keyboard.Type(specialKeys);
+                //Keyboard.Type(specialKeys);
+                // FIX: If windowName is provided, find and focus it FIRST
+                if (!string.IsNullOrEmpty(windowName))
+                {
+                    var window = FindWindow(windowName);
+                    if (window != null)
+                    {
+                        window.SetForeground();
+                        window.Focus();
+                        Wait.UntilInputIsProcessed();
+                        Thread.Sleep(200); // Small pause for OS focus switch
+                    }
+                    else
+                    {
+                        return $"Error: Target window '{windowName}' not found for sending keys.";
+                    }
+                }
+
+                // Use Windows Forms SendKeys to support codes like "{ENTER}", "^a"
+                System.Windows.Forms.SendKeys.SendWait(specialKeys);
+                Wait.UntilInputIsProcessed();
                 return $"Sent keys: {specialKeys}";
             }
             catch (Exception ex) { return $"Error sending keys: {ex.Message}"; }
@@ -226,8 +267,18 @@ namespace DesktopMcpServer
                 var comboBox = element.AsComboBox();
                 if (comboBox != null && itemNames.Count == 1)
                 {
-                    comboBox.Select(itemNames[0]);
-                    return $"Selected: {itemNames[0]}";
+                    //comboBox.Select(itemNames[0]);
+                    //return $"Selected: {itemNames[0]}";
+                    // FIX: Ensure we wait after expanding, or use the pattern directly if collapsed
+                    if (comboBox.Patterns.ExpandCollapse.TryGetPattern(out var expandPattern) &&
+                        expandPattern.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
+                    {
+                        expandPattern.Expand();
+                        Thread.Sleep(500); // FIX: Wait for animation to finish opening
+                    }
+                    
+                    var item = comboBox.Select(itemNames[0]);
+                    return $"Selected dropdown item: {itemNames[0]}";
                 }
 
                 if (element.Patterns.ExpandCollapse.TryGetPattern(out var expand))
@@ -235,6 +286,8 @@ namespace DesktopMcpServer
                     if (expand.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
                     {
                         expand.Expand();
+                        // FIX: Explicit pause to allow the dropdown list to render visually
+                        Thread.Sleep(500);
                         Wait.UntilInputIsProcessed();
                     }
                 }
@@ -242,11 +295,37 @@ namespace DesktopMcpServer
                 foreach (var name in itemNames)
                 {
                     var child = SmartFindElementInTree(element, name);
-                    if (child != null && child.Patterns.SelectionItem.TryGetPattern(out var selItem))
+                    //if (child != null && child.Patterns.SelectionItem.TryGetPattern(out var selItem))
+                    //{
+                    //    if (itemNames.Count > 1) selItem.AddToSelection();
+                    //    else selItem.Select();
+                    //    successLog.Add(name);
+                    //}
+                    if (child != null)
                     {
-                        if (itemNames.Count > 1) selItem.AddToSelection();
-                        else selItem.Select();
-                        successLog.Add(name);
+                        // Try selection pattern first (more reliable than clicking)
+                        if (child.Patterns.SelectionItem.TryGetPattern(out var selItem))
+                        {
+                            if (itemNames.Count > 1) selItem.AddToSelection();
+                            else selItem.Select();
+                            successLog.Add(name);
+                        }
+                        else
+                        {
+                            // Fallback to click, but verify visibility
+                            child.SetForeground();
+                            child.Click();
+                            successLog.Add(name);
+                        }
+                        // Small pause between multiple selections
+                        Thread.Sleep(200); 
+                    }
+                    else
+                    {
+                         // If not found, it might be off-screen (virtualized). 
+                         // Try sending a "Down" key to scroll, then look again? 
+                         // For now, just log failure.
+                         return $"Error: Item '{name}' not found in list.";
                     }
                 }
                 return $"Selected: {string.Join(", ", successLog)}";
