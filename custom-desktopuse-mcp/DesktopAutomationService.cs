@@ -184,6 +184,47 @@ namespace DesktopMcpServer
             }
         }
 
+        // Tool: WaitForElement (NEW)
+        public string WaitForElement(string fieldName, string? windowName = null, int timeoutSeconds = 20)
+        {
+            try
+            {
+                var waitTime = TimeSpan.FromSeconds(timeoutSeconds);
+
+                // Scenario 1: Wait for Window Only (if fieldName is empty/null)
+                if (string.IsNullOrEmpty(fieldName))
+                {
+                    if (string.IsNullOrEmpty(windowName)) return "Error: Must provide at least fieldName or windowName.";
+                    
+                    var window = Retry.WhileNull(() => FindWindow(windowName), waitTime).Result;
+                    
+                    return window != null 
+                        ? $"Successfully found window '{windowName}' within {timeoutSeconds}s." 
+                        : $"Timeout: Window '{windowName}' did not appear after {timeoutSeconds}s.";
+                }
+
+                // Scenario 2: Wait for Element (inside specific Window if provided)
+                // We use a custom retry loop here to respect the requested 'timeoutSeconds'
+                var element = Retry.WhileNull(() =>
+                {
+                    // 1. Find/Wait for Window first (fast check)
+                    var root = FindWindow(windowName);
+                    if (root == null) return null;
+
+                    // 2. Look for the element
+                    return SmartFindElementInTree(root, fieldName);
+                }, waitTime).Result;
+
+                return element != null 
+                    ? $"Successfully found element '{fieldName}' within {timeoutSeconds}s." 
+                    : $"Timeout: Element '{fieldName}' did not appear after {timeoutSeconds}s.";
+            }
+            catch (Exception ex)
+            {
+                return $"Error waiting for element: {ex.Message}";
+            }
+        }
+
         // --- ACTION TOOLS ---
 
         public string ClickElement(string fieldName, string? windowName = null)
