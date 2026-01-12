@@ -102,22 +102,68 @@ namespace DesktopMcpServer
             }
         }
 
-        public string CloseApp()
+        // Tool: CloseApp (Unified)
+        public string CloseApp(string? windowName = null)
         {
             try
             {
-                if (_currentApp == null || _currentApp.HasExited)
-                    return "No application is currently attached.";
+                // Scenario 1: Close the "Current" attached app (Default)
+                if (string.IsNullOrEmpty(windowName) || windowName.Equals("current", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (_currentApp == null || _currentApp.HasExited)
+                        return "No application is currently attached to the session.";
 
-                int pid = _currentApp.ProcessId;
-                try { _currentApp.Close(); } catch { _currentApp.Kill(); }
-                
-                _currentApp.Dispose();
-                _currentApp = null;
-                
-                return $"Successfully closed application (PID: {pid})";
+                    int pid = _currentApp.ProcessId;
+                    try { _currentApp.Close(); } catch { _currentApp.Kill(); }
+                    
+                    _currentApp.Dispose();
+                    _currentApp = null;
+                    return $"Successfully closed current application (PID: {pid})";
+                }
+
+                // Scenario 2: Find apps by Name or Window Title
+                var processes = Process.GetProcesses();
+                int closedCount = 0;
+                var log = new List<string>();
+
+                foreach (var p in processes)
+                {
+                    // Skip system processes
+                    if (p.Id <= 4) continue;
+
+                    try
+                    {
+                        bool match = false;
+                        
+                        // Check Process Name (e.g. "notepad")
+                        if (p.ProcessName.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
+                        
+                        // Check Window Title (e.g. "Untitled - Notepad")
+                        else if (!string.IsNullOrEmpty(p.MainWindowTitle) && 
+                                p.MainWindowTitle.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
+
+                        if (match)
+                        {
+                            p.CloseMainWindow();
+                            p.WaitForExit(1000); 
+                            if (!p.HasExited) p.Kill();
+
+                            closedCount++;
+                            log.Add($"{p.ProcessName} (PID: {p.Id})");
+                        }
+                    }
+                    catch { }
+                }
+
+                if (closedCount == 0)
+                    return $"Could not find any running application matching '{windowName}'.";
+
+                return $"Successfully closed {closedCount} application(s): {string.Join(", ", log)}";
             }
-            catch (Exception ex) { return $"Error closing app: {ex.Message}"; }
+            catch (Exception ex)
+            {
+                return $"Error closing app: {ex.Message}";
+            }
         }
 
         public string GetWindowTree(string fieldName)

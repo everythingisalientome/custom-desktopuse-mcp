@@ -17,10 +17,10 @@ namespace DesktopMcpServer
 
         // Tool: CloseApp
         [McpServerTool(Name = "CloseApp")]
-        [Description("Closes the currently running application.")]
-        public static string CloseApp(DesktopAutomationService service)
+        [Description("Closes an application. Provide 'windowName' (Title or Process Name) to close specific apps. Leave empty to close the current session app.")]
+        public static string CloseApp(string? windowName, DesktopAutomationService service)
         {
-            return service.CloseApp();
+            return service.CloseApp(windowName);
         }
 
         // Tool: GetWindowTree
