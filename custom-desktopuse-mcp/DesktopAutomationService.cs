@@ -15,7 +15,7 @@ namespace DesktopMcpServer
         private FlaUI.Core.Application? _currentApp;
 
         // Configurable timeouts
-        private readonly TimeSpan _launchTimeout = TimeSpan.FromSeconds(20); // INCREASED from 2s
+        private readonly TimeSpan _launchTimeout = TimeSpan.FromSeconds(20); 
         private readonly TimeSpan _windowSearchTimeout = TimeSpan.FromSeconds(5);
         private readonly TimeSpan _elementSearchTimeout = TimeSpan.FromSeconds(5);
 
@@ -36,7 +36,7 @@ namespace DesktopMcpServer
                 }
 
                 _currentApp = FlaUI.Core.Application.Launch(path);
-                
+
                 // FIX 1: Increased wait time for main window (20s)
                 // This covers splash screens that take a while to close/swap
                 var handleFound = _currentApp.WaitWhileMainHandleIsMissing(_launchTimeout);
@@ -45,7 +45,7 @@ namespace DesktopMcpServer
                 {
                     // If we timed out, we don't crash, but we warn the agent.
                     // Often the app is actually open (e.g., in tray), just no "Main Window" yet.
-                    return $"Launched: {path} (PID: {_currentApp.ProcessId}), but main window did not appear within 20 seconds. You may need to use 'GetWindowTree' to find it manually.";
+                    return $"Launched: {path} (PID: {_currentApp.ProcessId}), but main window did not appear within 20s. Try using 'GetWindowTree' manually.";
                 }
 
                 // FIX 2: Wait for application to be "Idle" (finished loading)
@@ -60,49 +60,6 @@ namespace DesktopMcpServer
             }
         }
 
-        // --- STRATEGY C: VERIFIED LAUNCH ---
-        // Use this if standard LaunchApp fails due to Splash Screens
-        public string LaunchAppVerified(string path, string expectedTitle)
-        {
-            try
-            {
-                if (_currentApp != null && !_currentApp.HasExited)
-                    CloseApp();
-
-                _currentApp = FlaUI.Core.Application.Launch(path);
-                
-                // Custom Retry Loop: Wait up to 30 seconds for specific window title
-                var desktop = _automation.GetDesktop();
-                var mainWindow = Retry.WhileNull(() =>
-                {
-                    // Search the entire desktop for a window containing the expected title
-                    var found = desktop.FindFirstDescendant(cf => cf.ByName(expectedTitle))?.AsWindow();
-                    
-                    // Or try by AutomationID if Name failed
-                    if (found == null)
-                        found = desktop.FindFirstDescendant(cf => cf.ByAutomationId(expectedTitle))?.AsWindow();
-
-                    return found;
-                }, TimeSpan.FromSeconds(30)).Result;
-
-                if (mainWindow == null)
-                {
-                    return $"Launched app (PID: {_currentApp.ProcessId}) but could not find window '{expectedTitle}' after 30 seconds.";
-                }
-
-                // Force focus to ensure it's ready
-                mainWindow.SetForeground();
-                Wait.UntilInputIsProcessed();
-
-                return $"Successfully launched and verified window: '{expectedTitle}'";
-            }
-            catch (Exception ex)
-            {
-                return $"Error in verified launch: {ex.Message}";
-            }
-        }
-
-        // Tool: CloseApp (Unified)
         public string CloseApp(string? windowName = null)
         {
             try
@@ -134,7 +91,6 @@ namespace DesktopMcpServer
                     try
                     {
                         bool match = false;
-                        
                         // Check Process Name (e.g. "notepad")
                         if (p.ProcessName.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
                         
@@ -170,7 +126,6 @@ namespace DesktopMcpServer
         {
             try
             {
-                // In this context, 'fieldName' is the criteria to find the window
                 var window = FindWindow(fieldName);
 
                 if (window == null) return $"Error: No window found matching '{fieldName}'";
@@ -181,47 +136,6 @@ namespace DesktopMcpServer
             catch (Exception ex)
             {
                 return $"Error retrieving window tree: {ex.Message}";
-            }
-        }
-
-        // Tool: WaitForElement (NEW)
-        public string WaitForElement(string fieldName, string? windowName = null, int timeoutSeconds = 20)
-        {
-            try
-            {
-                var waitTime = TimeSpan.FromSeconds(timeoutSeconds);
-
-                // Scenario 1: Wait for Window Only (if fieldName is empty/null)
-                if (string.IsNullOrEmpty(fieldName))
-                {
-                    if (string.IsNullOrEmpty(windowName)) return "Error: Must provide at least fieldName or windowName.";
-                    
-                    var window = Retry.WhileNull(() => FindWindow(windowName), waitTime).Result;
-                    
-                    return window != null 
-                        ? $"Successfully found window '{windowName}' within {timeoutSeconds}s." 
-                        : $"Timeout: Window '{windowName}' did not appear after {timeoutSeconds}s.";
-                }
-
-                // Scenario 2: Wait for Element (inside specific Window if provided)
-                // We use a custom retry loop here to respect the requested 'timeoutSeconds'
-                var element = Retry.WhileNull(() =>
-                {
-                    // 1. Find/Wait for Window first (fast check)
-                    var root = FindWindow(windowName);
-                    if (root == null) return null;
-
-                    // 2. Look for the element
-                    return SmartFindElementInTree(root, fieldName);
-                }, waitTime).Result;
-
-                return element != null 
-                    ? $"Successfully found element '{fieldName}' within {timeoutSeconds}s." 
-                    : $"Timeout: Element '{fieldName}' did not appear after {timeoutSeconds}s.";
-            }
-            catch (Exception ex)
-            {
-                return $"Error waiting for element: {ex.Message}";
             }
         }
 
@@ -443,6 +357,35 @@ namespace DesktopMcpServer
             catch (Exception ex) { return $"Error selecting radio: {ex.Message}"; }
         }
 
+        public string WaitForElement(string fieldName, string? windowName = null, int timeoutSeconds = 20)
+        {
+            try
+            {
+                var waitTime = TimeSpan.FromSeconds(timeoutSeconds);
+
+                if (string.IsNullOrEmpty(fieldName))
+                {
+                    if (string.IsNullOrEmpty(windowName)) return "Error: Must provide at least fieldName or windowName.";
+                    var window = Retry.WhileNull(() => FindWindow(windowName), waitTime).Result;
+                    return window != null 
+                        ? $"Found window '{windowName}'." 
+                        : $"Timeout: Window '{windowName}' not found.";
+                }
+
+                var element = Retry.WhileNull(() =>
+                {
+                    var root = FindWindow(windowName);
+                    if (root == null) return null;
+                    return SmartFindElementInTree(root, fieldName);
+                }, waitTime).Result;
+
+                return element != null 
+                    ? $"Found element '{fieldName}'." 
+                    : $"Timeout: Element '{fieldName}' not found.";
+            }
+            catch (Exception ex) { return $"Error waiting: {ex.Message}"; }
+        }
+
         // --- INTELLIGENT SEARCH HELPERS ---
 
         private AutomationElement? FindWindow(string? windowName)
@@ -451,27 +394,40 @@ namespace DesktopMcpServer
             {
                 if (_currentApp != null && !_currentApp.HasExited)
                 {
-                    return _currentApp.GetMainWindow(_automation);
+                    try { return _currentApp.GetMainWindow(_automation); } catch {}
                 }
                 return _automation.GetDesktop();
             }
 
             var desktop = _automation.GetDesktop();
+            
             return Retry.WhileNull(() => 
             {
-                var w = desktop.FindFirstDescendant(cf => cf.ByName(windowName));
-                if (w != null) return w;
-
-                w = desktop.FindFirstDescendant(cf => cf.ByAutomationId(windowName));
-                if (w != null) return w;
+                var topLevelWindows = desktop.FindAllChildren();
                 
-                w = desktop.FindFirstDescendant(cf => cf.ByClassName(windowName));
-                if (w != null) return w;
+                foreach (var win in topLevelWindows)
+                {
+                    var title = GetSafeProperty(() => win.Name);
+                    if (!string.IsNullOrEmpty(title) && title.Contains(windowName, StringComparison.OrdinalIgnoreCase))
+                        return win;
+
+                    var id = GetSafeProperty(() => win.AutomationId);
+                    if (!string.IsNullOrEmpty(id) && id.Contains(windowName, StringComparison.OrdinalIgnoreCase))
+                        return win;
+
+                    try 
+                    {
+                        var pid = win.Properties.ProcessId.Value;
+                        var proc = Process.GetProcessById(pid);
+                        if (proc.ProcessName.Contains(windowName, StringComparison.OrdinalIgnoreCase))
+                            return win;
+                    }
+                    catch { }
+                }
 
                 if (Enum.TryParse<ControlType>(windowName, true, out var type))
                 {
-                    w = desktop.FindFirstDescendant(cf => cf.ByControlType(type));
-                    if (w != null) return w;
+                     return desktop.FindFirstDescendant(cf => cf.ByControlType(type));
                 }
 
                 return null;
@@ -491,15 +447,30 @@ namespace DesktopMcpServer
 
         private AutomationElement? SmartFindElementInTree(AutomationElement root, string fieldName)
         {
+            // 1. Exact ID
             var el = root.FindFirstDescendant(cf => cf.ByAutomationId(fieldName));
             if (el != null) return el;
 
+            // 2. Exact Name
             el = root.FindFirstDescendant(cf => cf.ByName(fieldName));
             if (el != null) return el;
 
+            // 3. Partial Name Match (Fuzzy Fallback)
+            try 
+            {                
+                // This gets all descendants so we can filter in memory
+                var all = root.FindAllDescendants(); 
+                el = all.FirstOrDefault(e => e.Name != null && 
+                                           e.Name.Contains(fieldName, StringComparison.OrdinalIgnoreCase));
+                if (el != null) return el;
+            }
+            catch {}
+
+            // 4. Class Name
             el = root.FindFirstDescendant(cf => cf.ByClassName(fieldName));
             if (el != null) return el;
 
+            // 5. Control Type (Role)
             if (Enum.TryParse<ControlType>(fieldName, true, out var type))
             {
                 el = root.FindFirstDescendant(cf => cf.ByControlType(type));

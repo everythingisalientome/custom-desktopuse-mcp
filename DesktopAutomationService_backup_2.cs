@@ -12,8 +12,13 @@ namespace DesktopMcpServer
     public class DesktopAutomationService : IDisposable
     {
         private readonly UIA3Automation _automation;
-        // Store the currently controlled application here
         private FlaUI.Core.Application? _currentApp;
+
+        // Configurable timeouts
+        private readonly TimeSpan _launchTimeout = TimeSpan.FromSeconds(20); // INCREASED from 2s
+        private readonly TimeSpan _windowSearchTimeout = TimeSpan.FromSeconds(5);
+        private readonly TimeSpan _elementSearchTimeout = TimeSpan.FromSeconds(5);
+
         public DesktopAutomationService()
         {
             _automation = new UIA3Automation();
@@ -21,25 +26,33 @@ namespace DesktopMcpServer
 
         // --- CORE TOOLS ---
 
-        // Tool: Launch Application
         public string LaunchApp(string path)
         {
             try
             {
-                //Cleanup previous app if it's still running
                 if (_currentApp != null && !_currentApp.HasExited)
                 {
-                    _currentApp.Close();
-                    _currentApp.Dispose();
+                    CloseApp();
                 }
 
-                // Launch app with FlaUI
                 _currentApp = FlaUI.Core.Application.Launch(path);
                 
-                //Wait a moment for the main window to be created
-                _currentApp.WaitWhileMainHandleIsMissing(TimeSpan.FromSeconds(2));
+                // FIX 1: Increased wait time for main window (20s)
+                // This covers splash screens that take a while to close/swap
+                var handleFound = _currentApp.WaitWhileMainHandleIsMissing(_launchTimeout);
+                
+                if (!handleFound) 
+                {
+                    // If we timed out, we don't crash, but we warn the agent.
+                    // Often the app is actually open (e.g., in tray), just no "Main Window" yet.
+                    return $"Launched: {path} (PID: {_currentApp.ProcessId}), but main window did not appear within 20 seconds. You may need to use 'GetWindowTree' to find it manually.";
+                }
 
-                return $"Successfully launched: {path} (PID: {_currentApp.ProcessId}). Application object cached for future commands.";
+                // FIX 2: Wait for application to be "Idle" (finished loading)
+                _currentApp.WaitWhileBusy(); 
+                Wait.UntilInputIsProcessed();
+
+                return $"Successfully launched: {path} (PID: {_currentApp.ProcessId})";
             }
             catch (Exception ex)
             {
@@ -47,45 +60,121 @@ namespace DesktopMcpServer
             }
         }
 
-        // Tool: Get the window tree as JSON
-        public string GetWindowTree(string windowTitle)
+        // --- STRATEGY C: VERIFIED LAUNCH ---
+        // Use this if standard LaunchApp fails due to Splash Screens
+        public string LaunchAppVerified(string path, string expectedTitle)
         {
             try
             {
-                Window? window = null;
-                // Logic 1: Use Cached App (Fastest & Most Reliable)
-                // If the user asks for "Current", "Active", or the title matches the launched app
                 if (_currentApp != null && !_currentApp.HasExited)
+                    CloseApp();
+
+                _currentApp = FlaUI.Core.Application.Launch(path);
+                
+                // Custom Retry Loop: Wait up to 30 seconds for specific window title
+                var desktop = _automation.GetDesktop();
+                var mainWindow = Retry.WhileNull(() =>
                 {
-                    // Try to get the main window from the cached app object
-                    var cachedWindow = _currentApp.GetMainWindow(_automation);
+                    // Search the entire desktop for a window containing the expected title
+                    var found = desktop.FindFirstDescendant(cf => cf.ByName(expectedTitle))?.AsWindow();
                     
-                    // If the user didn't specify a title, OR the titles match, use this one
-                    if (string.IsNullOrEmpty(windowTitle) || 
-                        windowTitle.Equals("current", StringComparison.OrdinalIgnoreCase) ||
-                        (cachedWindow != null && cachedWindow.Name.Contains(windowTitle, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        window = cachedWindow;
-                    }
-                }
+                    // Or try by AutomationID if Name failed
+                    if (found == null)
+                        found = desktop.FindFirstDescendant(cf => cf.ByAutomationId(expectedTitle))?.AsWindow();
 
-                // Logic 2: Search Desktop (Fallback)
-                // If we didn't find it in cache, search the whole desktop like before
-                if (window == null && !string.IsNullOrEmpty(windowTitle))
+                    return found;
+                }, TimeSpan.FromSeconds(30)).Result;
+
+                if (mainWindow == null)
                 {
-                    var desktop = _automation.GetDesktop();
-                    window = Retry.WhileNull(() =>
-                    {
-                        var exact = desktop.FindFirstDescendant(cf => cf.ByName(windowTitle))?.AsWindow();
-                        if (exact != null) return exact;
-                        var allWindows = desktop.FindAllChildren();
-                        return allWindows.FirstOrDefault(w => w.Name.Contains(windowTitle, StringComparison.OrdinalIgnoreCase))?.AsWindow();
-                    }, TimeSpan.FromSeconds(2)).Result;
+                    return $"Launched app (PID: {_currentApp.ProcessId}) but could not find window '{expectedTitle}' after 30 seconds.";
                 }
 
-                if (window == null) return $"Error: No window found containing title '{windowTitle}'";
+                // Force focus to ensure it's ready
+                mainWindow.SetForeground();
+                Wait.UntilInputIsProcessed();
 
-                // Build JSON Tree
+                return $"Successfully launched and verified window: '{expectedTitle}'";
+            }
+            catch (Exception ex)
+            {
+                return $"Error in verified launch: {ex.Message}";
+            }
+        }
+
+        // Tool: CloseApp (Unified)
+        public string CloseApp(string? windowName = null)
+        {
+            try
+            {
+                // Scenario 1: Close the "Current" attached app (Default)
+                if (string.IsNullOrEmpty(windowName) || windowName.Equals("current", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (_currentApp == null || _currentApp.HasExited)
+                        return "No application is currently attached to the session.";
+
+                    int pid = _currentApp.ProcessId;
+                    try { _currentApp.Close(); } catch { _currentApp.Kill(); }
+                    
+                    _currentApp.Dispose();
+                    _currentApp = null;
+                    return $"Successfully closed current application (PID: {pid})";
+                }
+
+                // Scenario 2: Find apps by Name or Window Title
+                var processes = Process.GetProcesses();
+                int closedCount = 0;
+                var log = new List<string>();
+
+                foreach (var p in processes)
+                {
+                    // Skip system processes
+                    if (p.Id <= 4) continue;
+
+                    try
+                    {
+                        bool match = false;
+                        
+                        // Check Process Name (e.g. "notepad")
+                        if (p.ProcessName.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
+                        
+                        // Check Window Title (e.g. "Untitled - Notepad")
+                        else if (!string.IsNullOrEmpty(p.MainWindowTitle) && 
+                                p.MainWindowTitle.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
+
+                        if (match)
+                        {
+                            p.CloseMainWindow();
+                            p.WaitForExit(1000); 
+                            if (!p.HasExited) p.Kill();
+
+                            closedCount++;
+                            log.Add($"{p.ProcessName} (PID: {p.Id})");
+                        }
+                    }
+                    catch { }
+                }
+
+                if (closedCount == 0)
+                    return $"Could not find any running application matching '{windowName}'.";
+
+                return $"Successfully closed {closedCount} application(s): {string.Join(", ", log)}";
+            }
+            catch (Exception ex)
+            {
+                return $"Error closing app: {ex.Message}";
+            }
+        }
+
+        public string GetWindowTree(string fieldName)
+        {
+            try
+            {
+                // In this context, 'fieldName' is the criteria to find the window
+                var window = FindWindow(fieldName);
+
+                if (window == null) return $"Error: No window found matching '{fieldName}'";
+
                 var tree = BuildSimplifiedTree(window, 0, maxDepth: 4);
                 return JsonSerializer.Serialize(tree, new JsonSerializerOptions { WriteIndented = true });
             }
@@ -95,322 +184,339 @@ namespace DesktopMcpServer
             }
         }
 
-        //Pass this as criteria,Pass this as value
-        //Field Name / x:Name,"""id""","""createReportButton"""
-        //AutomationId,"""id""","""createReportButton"""
-        //Visible Text / Label,"""name""","""Create Report"""
-        //Button Text,"""name""","""Submit"""
-        
-
-        // Tool: Click Element
-        public string ClickElement(string criteria, string value)
+        // Tool: WaitForElement (NEW)
+        public string WaitForElement(string fieldName, string? windowName = null, int timeoutSeconds = 20)
         {
             try
             {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
+                var waitTime = TimeSpan.FromSeconds(timeoutSeconds);
+
+                // Scenario 1: Wait for Window Only (if fieldName is empty/null)
+                if (string.IsNullOrEmpty(fieldName))
+                {
+                    if (string.IsNullOrEmpty(windowName)) return "Error: Must provide at least fieldName or windowName.";
+                    
+                    var window = Retry.WhileNull(() => FindWindow(windowName), waitTime).Result;
+                    
+                    return window != null 
+                        ? $"Successfully found window '{windowName}' within {timeoutSeconds}s." 
+                        : $"Timeout: Window '{windowName}' did not appear after {timeoutSeconds}s.";
+                }
+
+                // Scenario 2: Wait for Element (inside specific Window if provided)
+                // We use a custom retry loop here to respect the requested 'timeoutSeconds'
+                var element = Retry.WhileNull(() =>
+                {
+                    // 1. Find/Wait for Window first (fast check)
+                    var root = FindWindow(windowName);
+                    if (root == null) return null;
+
+                    // 2. Look for the element
+                    return SmartFindElementInTree(root, fieldName);
+                }, waitTime).Result;
+
+                return element != null 
+                    ? $"Successfully found element '{fieldName}' within {timeoutSeconds}s." 
+                    : $"Timeout: Element '{fieldName}' did not appear after {timeoutSeconds}s.";
+            }
+            catch (Exception ex)
+            {
+                return $"Error waiting for element: {ex.Message}";
+            }
+        }
+
+        // --- ACTION TOOLS ---
+
+        public string ClickElement(string fieldName, string? windowName = null)
+        {
+            try
+            {
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}' in window '{windowName ?? "Current"}'";
 
                 if (element.Patterns.Invoke.TryGetPattern(out var invokePattern))
                 {
                     invokePattern.Invoke();
-                    return $"Successfully invoked element: {value}";
+                    return $"Successfully invoked: {fieldName}";
                 }
 
                 element.Click();
-                return $"Successfully clicked element: {value}";
+                return $"Successfully clicked: {fieldName}";
             }
-            catch (Exception ex)
-            {
-                return $"Error clicking element: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error clicking element: {ex.Message}"; }
         }
 
-        // Tool: RightClick
-        public string RightClickElement(string criteria, string value)
+        public string RightClickElement(string fieldName, string? windowName = null)
         {
             try
             {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
-
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}'";
                 element.RightClick();
-                return $"Successfully right-clicked element: {value}";
+                return $"Right-clicked: {fieldName}";
             }
-            catch (Exception ex)
-            {
-                return $"Error right-clicking element: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error right-clicking: {ex.Message}"; }
         }
 
-        // Tool: GetText
-        public string GetText(string criteria, string value)
+        // --- INPUT TOOLS ---
+
+        public string WriteText(string fieldName, string value, string? specialKeys = null, string? windowName = null)
         {
             try
             {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}'";
 
-                // 1. Try ValuePattern (TextBoxes)
+                element.SetForeground();
+                element.Focus();
+                Wait.UntilInputIsProcessed(); 
+
+                if (!string.IsNullOrEmpty(specialKeys))
+                {
+                    Keyboard.Type(specialKeys);
+                    Wait.UntilInputIsProcessed();
+                }
+
+                if (!string.IsNullOrEmpty(value))
+                {
+                    if (element.Patterns.Value.TryGetPattern(out var valuePattern))
+                    {
+                        valuePattern.SetValue(value);
+                    }
+                    else
+                    {
+                        Keyboard.Type(value);
+                    }
+                }
+
+                return $"Successfully wrote to '{fieldName}'.";
+            }
+            catch (Exception ex) { return $"Error writing text: {ex.Message}"; }
+        }
+
+        public string GetText(string fieldName, string? windowName = null)
+        {
+            try
+            {
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}'";
+
                 if (element.Patterns.Value.TryGetPattern(out var valuePattern))
-                {
                     return valuePattern.Value.Value;
-                }
-                
-                // 2. Try TextPattern (Documents/RichText)
-                if (element.Patterns.Text.TryGetPattern(out var textPattern))
-                {
-                    return textPattern.DocumentRange.GetText(Int32.MaxValue);
-                }
 
-                // 3. Fallback to Name property (Labels/Buttons often store text here)
+                if (element.Patterns.Text.TryGetPattern(out var textPattern))
+                    return textPattern.DocumentRange.GetText(Int32.MaxValue);
+
                 return element.Name;
             }
-            catch (Exception ex)
-            {
-                return $"Error reading text: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error reading text: {ex.Message}"; }
         }
 
-        // Tool: TypeText (Renamed/Refined from WriteText)
-        public string TypeText(string criteria, string value, string text)
+        public string SendSpecialKeys(string specialKeys)
         {
             try
             {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
+                Keyboard.Type(specialKeys);
+                return $"Sent keys: {specialKeys}";
+            }
+            catch (Exception ex) { return $"Error sending keys: {ex.Message}"; }
+        }
 
-                // Always try setting value programmatically first (instant)
-                if (element.Patterns.Value.TryGetPattern(out var valuePattern))
-                {
-                    valuePattern.SetValue(text);
-                    return $"Successfully set value to: {text}";
-                }
+        public string SendKeys(string fieldName, string value, string? windowName = null)
+        {
+            try
+            {
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}'";
 
-                // Fallback to typing
                 element.SetForeground();
                 element.Focus();
                 Wait.UntilInputIsProcessed();
-                Keyboard.Type(text);
-                return $"Successfully typed text: {text}";
+
+                Random rnd = new Random();
+                foreach (char c in value)
+                {
+                    Keyboard.Type(c.ToString());
+                    Thread.Sleep(rnd.Next(50, 150)); 
+                }
+
+                return $"Successfully typed '{value}' into '{fieldName}' (Human-like).";
             }
-            catch (Exception ex)
-            {
-                return $"Error typing text: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error typing human-like text: {ex.Message}"; }
         }
 
-        // Tool: SendKeys (Global keys)
-        public string SendKeys(string keys)
+        // --- SELECTION TOOLS ---
+
+        public string SelectItems(string fieldName, string value, string? windowName = null)
         {
             try
             {
-                // NOTE: This sends keys to whatever is currently focused!
-                Keyboard.Type(keys);
-                return $"Successfully sent keys: {keys}";
-            }
-            catch (Exception ex)
-            {
-                return $"Error sending keys: {ex.Message}";
-            }
-        }
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}'";
 
-        // Tool: SelectItems
-        public string SelectItems(string criteria, string value, string items)
-        {
-            try
-            {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
-
-                var itemNames = items.Split(',').Select(i => i.Trim()).ToList();
+                var itemNames = value.Split(',').Select(i => i.Trim()).ToList();
                 var successLog = new List<string>();
 
-                // Strategy 1: Handle as ComboBox (The standard "Dropdown")
-                // FlaUI's ComboBox wrapper handles expanding/collapsing automatically
                 var comboBox = element.AsComboBox();
                 if (comboBox != null && itemNames.Count == 1)
                 {
-                    var item = comboBox.Select(itemNames[0]);
-                    if (item != null) return $"Successfully selected dropdown item: {itemNames[0]}";
+                    comboBox.Select(itemNames[0]);
+                    return $"Selected dropdown item: {itemNames[0]}";
                 }
 
-                // Strategy 2: Handle as Generic List/Container (For Multi-select or non-standard dropdowns)
-                // If it's a ComboBox that wasn't handled above, ensure it's expanded
-                if (element.Patterns.ExpandCollapse.TryGetPattern(out var expandPattern))
+                if (element.Patterns.ExpandCollapse.TryGetPattern(out var expand))
                 {
-                    if (expandPattern.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
+                    if (expand.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
                     {
-                        expandPattern.Expand();
+                        expand.Expand();
                         Wait.UntilInputIsProcessed();
                     }
                 }
 
                 foreach (var name in itemNames)
                 {
-                    // Find the specific item (child) by name
-                    var childItem = Retry.WhileNull(() =>
+                    var child = SmartFindElementInTree(element, name);
+                    if (child != null && child.Patterns.SelectionItem.TryGetPattern(out var selItem))
                     {
-                        return element.FindFirstDescendant(cf => cf.ByName(name));
-                    }, TimeSpan.FromSeconds(1)).Result;
-
-                    if (childItem == null)
-                    {
-                        successLog.Add($"Failed to find item: '{name}'");
-                        continue;
-                    }
-
-                    // Try to select it
-                    if (childItem.Patterns.SelectionItem.TryGetPattern(out var selectionPattern))
-                    {
-                        if (itemNames.Count > 1)
-                            selectionPattern.AddToSelection(); // Multi-select
-                        else
-                            selectionPattern.Select(); // Single select
-                        
-                        successLog.Add($"Selected: {name}");
-                    }
-                    else
-                    {
-                        // Fallback: Just click it (sometimes works for simple custom dropdowns)
-                        childItem.Click();
-                        successLog.Add($"Clicked: {name}");
+                        if (itemNames.Count > 1) selItem.AddToSelection();
+                        else selItem.Select();
+                        successLog.Add(name);
                     }
                 }
-
-                return string.Join("; ", successLog);
+                return $"Selected: {string.Join(", ", successLog)}";
             }
-            catch (Exception ex)
-            {
-                return $"Error selecting items: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error selecting items: {ex.Message}"; }
         }
 
-        // Tool: SetCheckbox
-        public string SetCheckbox(string criteria, string value, string toggleState)
+        public string SetCheckbox(string fieldName, string value, string? windowName = null)
         {
             try
             {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
+                var element = SmartFindElement(fieldName, windowName);
+                if (element == null) return $"Error: Element not found '{fieldName}'";
 
-                // Parse desired state ("on", "true", "checked" -> true)
-                bool wantChecked = toggleState.ToLower() is "on" or "true" or "checked" or "yes";
-
-                // Try using the specific CheckBox wrapper first (easiest)
+                bool wantChecked = value.ToLower() is "on" or "true" or "checked" or "yes";
+                
                 var checkbox = element.AsCheckBox();
                 if (checkbox != null)
                 {
-                    if (wantChecked && checkbox.IsChecked != true)
-                    {
-                        checkbox.IsChecked = true; // Use FlaUI helper to toggle if needed
-                        return $"Successfully checked: {value}";
-                    }
-                    else if (!wantChecked && checkbox.IsChecked != false)
-                    {
-                        checkbox.IsChecked = false;
-                        return $"Successfully unchecked: {value}";
-                    }
-                    return $"Checkbox '{value}' was already in the desired state.";
+                    if (wantChecked && checkbox.IsChecked != true) checkbox.IsChecked = true;
+                    else if (!wantChecked && checkbox.IsChecked != false) checkbox.IsChecked = false;
+                    return $"Checkbox '{fieldName}' set to {(wantChecked ? "Checked" : "Unchecked")}";
                 }
-
-                // Fallback: Raw Toggle Pattern (for custom controls)
-                if (element.Patterns.Toggle.TryGetPattern(out var togglePattern))
+                
+                if (element.Patterns.Toggle.TryGetPattern(out var toggle))
                 {
-                    var currentState = togglePattern.ToggleState.Value;
-                    
-                    if (wantChecked && currentState != ToggleState.On)
-                    {
-                        togglePattern.Toggle();
-                        return $"Successfully toggled ON: {value}";
-                    }
-                    else if (!wantChecked && currentState == ToggleState.On)
-                    {
-                        togglePattern.Toggle();
-                        return $"Successfully toggled OFF: {value}";
-                    }
-                    return $"Element '{value}' was already in correct state.";
+                    if (wantChecked && toggle.ToggleState.Value != ToggleState.On) toggle.Toggle();
+                    else if (!wantChecked && toggle.ToggleState.Value == ToggleState.On) toggle.Toggle();
+                    return $"Toggled '{fieldName}'";
                 }
 
-                return "Error: Element does not support Toggling/Checkbox pattern.";
+                return "Error: Element does not support Checkbox/Toggle pattern";
             }
-            catch (Exception ex)
-            {
-                return $"Error setting checkbox: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error setting checkbox: {ex.Message}"; }
         }
 
-        // Tool: SelectRadioButton
-        public string SelectRadioButton(string criteria, string value)
+        public string SelectRadioButton(string fieldName, string value, string? windowName = null)
         {
             try
             {
-                var element = FindElement(criteria, value);
-                if (element == null) return $"Error: Element not found ({criteria}={value})";
+                var element = SmartFindElement(fieldName, windowName);
+                
+                if (element != null && !string.IsNullOrEmpty(value) && !(value.ToLower() is "on" or "true"))
+                {
+                     var childOption = SmartFindElementInTree(element, value);
+                     if (childOption != null) element = childOption;
+                }
 
-                // 1. Try SelectionItem Pattern (Standard Radio Button logic)
+                if (element == null) return $"Error: Radio element not found '{fieldName}'";
+
                 if (element.Patterns.SelectionItem.TryGetPattern(out var selectionPattern))
                 {
                     selectionPattern.Select();
-                    return $"Successfully selected radio button: {value}";
+                    return $"Selected radio: {element.Name ?? fieldName}";
                 }
                 
-                // 2. Fallback: Just click it (Works for simple web-style radio buttons)
                 element.Click();
-                return $"Clicked radio button (fallback): {value}";
+                return $"Clicked radio: {element.Name ?? fieldName}";
             }
-            catch (Exception ex)
-            {
-                return $"Error selecting radio button: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error selecting radio: {ex.Message}"; }
         }
 
-        // --- Helper Methods ---
+        // --- INTELLIGENT SEARCH HELPERS ---
 
-        private AutomationElement? FindElement(string criteria, string value)
+        private AutomationElement? FindWindow(string? windowName)
         {
-            // Uses the cached app if available, otherwise searches desktop
-            var root = _currentApp?.GetMainWindow(_automation) ?? _automation.GetDesktop();
-            return Retry.WhileNull(() =>
+            if (string.IsNullOrEmpty(windowName) || windowName.Equals("current", StringComparison.OrdinalIgnoreCase))
             {
-                // Try the specific criteria requested
-                AutomationElement? element = criteria.ToLower() switch
+                if (_currentApp != null && !_currentApp.HasExited)
                 {
-                    "id" or "automationid" => root.FindFirstDescendant(cf => cf.ByAutomationId(value)),
-                    "name" => root.FindFirstDescendant(cf => cf.ByName(value)),
-                    _ => null
-                };
+                    return _currentApp.GetMainWindow(_automation);
+                }
+                return _automation.GetDesktop();
+            }
 
-                // If not found, try the "other" property automatically
-                // This handles cases where the AI says "Click ID 'Save'" but 'Save' is actually the Name.
-                if (element == null)
+            var desktop = _automation.GetDesktop();
+            return Retry.WhileNull(() => 
+            {
+                var w = desktop.FindFirstDescendant(cf => cf.ByName(windowName));
+                if (w != null) return w;
+
+                w = desktop.FindFirstDescendant(cf => cf.ByAutomationId(windowName));
+                if (w != null) return w;
+                
+                w = desktop.FindFirstDescendant(cf => cf.ByClassName(windowName));
+                if (w != null) return w;
+
+                if (Enum.TryParse<ControlType>(windowName, true, out var type))
                 {
-                    // If we looked for ID and failed, try Name
-                    if (criteria.ToLower() is "id" or "automationid")
-                        element = root.FindFirstDescendant(cf => cf.ByName(value));
-                    
-                    // If we looked for Name and failed, try ID
-                    else if (criteria.ToLower() == "name")
-                        element = root.FindFirstDescendant(cf => cf.ByAutomationId(value));
+                    w = desktop.FindFirstDescendant(cf => cf.ByControlType(type));
+                    if (w != null) return w;
                 }
 
-                return element;
-            }, TimeSpan.FromSeconds(2)).Result;
+                return null;
+            }, _windowSearchTimeout).Result;
         }
 
+        private AutomationElement? SmartFindElement(string fieldName, string? windowName = null)
+        {
+            var root = FindWindow(windowName);
+            if (root == null) return null;
+
+            Wait.UntilInputIsProcessed(); 
+
+            return Retry.WhileNull(() => SmartFindElementInTree(root, fieldName), 
+                                   _elementSearchTimeout).Result;
+        }
+
+        private AutomationElement? SmartFindElementInTree(AutomationElement root, string fieldName)
+        {
+            var el = root.FindFirstDescendant(cf => cf.ByAutomationId(fieldName));
+            if (el != null) return el;
+
+            el = root.FindFirstDescendant(cf => cf.ByName(fieldName));
+            if (el != null) return el;
+
+            el = root.FindFirstDescendant(cf => cf.ByClassName(fieldName));
+            if (el != null) return el;
+
+            if (Enum.TryParse<ControlType>(fieldName, true, out var type))
+            {
+                el = root.FindFirstDescendant(cf => cf.ByControlType(type));
+                if (el != null) return el;
+            }
+
+            return null;
+        }
+        
         private SimplifiedControl BuildSimplifiedTree(AutomationElement element, int currentDepth, int maxDepth)
         {
-            //fetch once
-            var cType = GetSafeProperty(() => element.ControlType.ToString());
-            var cName = GetSafeProperty(() => element.Name);
-            var cId = GetSafeProperty(() => element.AutomationId);
-            var cClass = GetSafeProperty(() => element.ClassName);
-
             var node = new SimplifiedControl
             {
-                ControlType = cType,
-                Name = cName,
-                AutomationId = cId,
-                ClassName = cClass
+                ControlType = GetSafeProperty(() => element.ControlType.ToString()),
+                Name = GetSafeProperty(() => element.Name),
+                AutomationId = GetSafeProperty(() => element.AutomationId),
+                ClassName = GetSafeProperty(() => element.ClassName)
             };
 
             if (currentDepth < maxDepth)
@@ -420,79 +526,31 @@ namespace DesktopMcpServer
                     var children = element.FindAllChildren();
                     foreach (var child in children)
                     {
-                        // 2. Fetch Child properties ONCE
-                        var childType = GetSafeProperty(() => child.ControlType.ToString());
-                        var childName = GetSafeProperty(() => child.Name);
-                        var childId = GetSafeProperty(() => child.AutomationId);
-                        var childClass = GetSafeProperty(() => child.ClassName);
+                        var cType = GetSafeProperty(() => child.ControlType.ToString());
+                        var cName = GetSafeProperty(() => child.Name);
+                        var cId = GetSafeProperty(() => child.AutomationId);
 
-                        // 3. Filter using the fetched values
-                        if (childType == ControlType.Pane.ToString() &&
-                            string.IsNullOrEmpty(childName) &&
-                            string.IsNullOrEmpty(childId))
-                        {
+                        if (cType == ControlType.Pane.ToString() && string.IsNullOrEmpty(cName) && string.IsNullOrEmpty(cId))
                             continue;
-                        }
-                        
+
                         node.Children.Add(BuildSimplifiedTree(child, currentDepth + 1, maxDepth));
                     }
                 }
-                catch
-                {
-                    // Ignore children if access is denied
-                }
+                catch { }
             }
-
             return node;
         }
 
         private string GetSafeProperty(Func<object> propertyGetter)
         {
-            try
-            {
-                var result = propertyGetter();
-                return result?.ToString() ?? "";
-            }
+            try { return propertyGetter()?.ToString() ?? ""; }
             catch { return ""; }
         }
 
         public void Dispose()
         {
-            if (_currentApp != null && !_currentApp.HasExited)
-            {
-                try 
-                { 
-                    _currentApp.Close(); // Tries to close gracefully (Alt+F4 equivalent)
-                } 
-                catch 
-                { 
-                    _currentApp.Kill(); // Force kill if it's stuck
-                }
-            }
             _currentApp?.Dispose();
             _automation?.Dispose();
-        }
-
-        public string CloseApp()
-        {
-            try
-            {
-                if (_currentApp == null || _currentApp.HasExited)
-                    return "No application is currently attached.";
-
-                int pid = _currentApp.ProcessId;
-                _currentApp.Close(); // Graceful close
-                // _currentApp.Kill(); // Use this if you want to force it instantly
-                
-                _currentApp.Dispose();
-                _currentApp = null; // Clear the cache
-                
-                return $"Successfully closed application (PID: {pid})";
-            }
-            catch (Exception ex)
-            {
-                return $"Error closing app: {ex.Message}";
-            }
         }
     }
 
