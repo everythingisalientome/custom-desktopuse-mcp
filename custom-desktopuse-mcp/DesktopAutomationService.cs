@@ -4,6 +4,7 @@ using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.Core.Tools;
 using FlaUI.UIA3;
+using FlaUI.Core.Conditions; // Required for specific search conditions
 using System.Diagnostics;
 using System.Text.Json;
 
@@ -30,96 +31,64 @@ namespace DesktopMcpServer
         {
             try
             {
-                if (_currentApp != null && !_currentApp.HasExited)
-                {
-                    CloseApp();
-                }
+                if (_currentApp != null && !_currentApp.HasExited) CloseApp();
 
                 _currentApp = FlaUI.Core.Application.Launch(path);
-
-                // FIX 1: Increased wait time for main window (20s)
-                // This covers splash screens that take a while to close/swap
-                var handleFound = _currentApp.WaitWhileMainHandleIsMissing(_launchTimeout);
                 
+                var handleFound = _currentApp.WaitWhileMainHandleIsMissing(_launchTimeout);
                 if (!handleFound) 
-                {
-                    // If we timed out, we don't crash, but we warn the agent.
-                    // Often the app is actually open (e.g., in tray), just no "Main Window" yet.
                     return $"Launched: {path} (PID: {_currentApp.ProcessId}), but main window did not appear within 20s. Try using 'GetWindowTree' manually.";
-                }
 
-                // FIX 2: Wait for application to be "Idle" (finished loading)
                 _currentApp.WaitWhileBusy(); 
                 Wait.UntilInputIsProcessed();
 
                 return $"Successfully launched: {path} (PID: {_currentApp.ProcessId})";
             }
-            catch (Exception ex)
-            {
-                return $"Error launching app: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error launching app: {ex.Message}"; }
         }
 
         public string CloseApp(string? windowName = null)
         {
             try
             {
-                // Scenario 1: Close the "Current" attached app (Default)
                 if (string.IsNullOrEmpty(windowName) || windowName.Equals("current", StringComparison.OrdinalIgnoreCase))
                 {
                     if (_currentApp == null || _currentApp.HasExited)
-                        return "No application is currently attached to the session.";
+                        return "No application is currently attached.";
 
                     int pid = _currentApp.ProcessId;
                     try { _currentApp.Close(); } catch { _currentApp.Kill(); }
-                    
                     _currentApp.Dispose();
                     _currentApp = null;
-                    return $"Successfully closed current application (PID: {pid})";
+                    return $"Closed current app (PID: {pid})";
                 }
 
-                // Scenario 2: Find apps by Name or Window Title
                 var processes = Process.GetProcesses();
                 int closedCount = 0;
-                var log = new List<string>();
-
+                
                 foreach (var p in processes)
                 {
-                    // Skip system processes
                     if (p.Id <= 4) continue;
-
                     try
                     {
                         bool match = false;
-                        // Check Process Name (e.g. "notepad")
                         if (p.ProcessName.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
-                        
-                        // Check Window Title (e.g. "Untitled - Notepad")
                         else if (!string.IsNullOrEmpty(p.MainWindowTitle) && 
-                                p.MainWindowTitle.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
+                                 p.MainWindowTitle.Contains(windowName, StringComparison.OrdinalIgnoreCase)) match = true;
 
                         if (match)
                         {
                             p.CloseMainWindow();
                             p.WaitForExit(1000); 
                             if (!p.HasExited) p.Kill();
-
                             closedCount++;
-                            log.Add($"{p.ProcessName} (PID: {p.Id})");
                         }
                     }
                     catch { }
                 }
-
-                if (closedCount == 0)
-                    return $"Could not find any running application matching '{windowName}'.";
-
-                return $"Successfully closed {closedCount} application(s): {string.Join(", ", log)}";
+                return closedCount > 0 ? $"Closed {closedCount} apps matching '{windowName}'." : $"No apps found matching '{windowName}'.";
             }
-            catch (Exception ex)
-            {
-                return $"Error closing app: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error closing app: {ex.Message}"; }
         }
 
         public string GetWindowTree(string fieldName)
@@ -127,16 +96,12 @@ namespace DesktopMcpServer
             try
             {
                 var window = FindWindow(fieldName);
-
                 if (window == null) return $"Error: No window found matching '{fieldName}'";
 
                 var tree = BuildSimplifiedTree(window, 0, maxDepth: 4);
                 return JsonSerializer.Serialize(tree, new JsonSerializerOptions { WriteIndented = true });
             }
-            catch (Exception ex)
-            {
-                return $"Error retrieving window tree: {ex.Message}";
-            }
+            catch (Exception ex) { return $"Error retrieving tree: {ex.Message}"; }
         }
 
         // --- ACTION TOOLS ---
@@ -153,11 +118,10 @@ namespace DesktopMcpServer
                     invokePattern.Invoke();
                     return $"Successfully invoked: {fieldName}";
                 }
-
                 element.Click();
                 return $"Successfully clicked: {fieldName}";
             }
-            catch (Exception ex) { return $"Error clicking element: {ex.Message}"; }
+            catch (Exception ex) { return $"Error clicking: {ex.Message}"; }
         }
 
         public string RightClickElement(string fieldName, string? windowName = null)
@@ -171,8 +135,6 @@ namespace DesktopMcpServer
             }
             catch (Exception ex) { return $"Error right-clicking: {ex.Message}"; }
         }
-
-        // --- INPUT TOOLS ---
 
         public string WriteText(string fieldName, string value, string? specialKeys = null, string? windowName = null)
         {
@@ -194,16 +156,11 @@ namespace DesktopMcpServer
                 if (!string.IsNullOrEmpty(value))
                 {
                     if (element.Patterns.Value.TryGetPattern(out var valuePattern))
-                    {
                         valuePattern.SetValue(value);
-                    }
                     else
-                    {
                         Keyboard.Type(value);
-                    }
                 }
-
-                return $"Successfully wrote to '{fieldName}'.";
+                return $"Wrote to '{fieldName}'.";
             }
             catch (Exception ex) { return $"Error writing text: {ex.Message}"; }
         }
@@ -217,10 +174,8 @@ namespace DesktopMcpServer
 
                 if (element.Patterns.Value.TryGetPattern(out var valuePattern))
                     return valuePattern.Value.Value;
-
                 if (element.Patterns.Text.TryGetPattern(out var textPattern))
                     return textPattern.DocumentRange.GetText(Int32.MaxValue);
-
                 return element.Name;
             }
             catch (Exception ex) { return $"Error reading text: {ex.Message}"; }
@@ -253,13 +208,10 @@ namespace DesktopMcpServer
                     Keyboard.Type(c.ToString());
                     Thread.Sleep(rnd.Next(50, 150)); 
                 }
-
-                return $"Successfully typed '{value}' into '{fieldName}' (Human-like).";
+                return $"Typed '{value}' (Human-like).";
             }
-            catch (Exception ex) { return $"Error typing human-like text: {ex.Message}"; }
+            catch (Exception ex) { return $"Error typing: {ex.Message}"; }
         }
-
-        // --- SELECTION TOOLS ---
 
         public string SelectItems(string fieldName, string value, string? windowName = null)
         {
@@ -275,7 +227,7 @@ namespace DesktopMcpServer
                 if (comboBox != null && itemNames.Count == 1)
                 {
                     comboBox.Select(itemNames[0]);
-                    return $"Selected dropdown item: {itemNames[0]}";
+                    return $"Selected: {itemNames[0]}";
                 }
 
                 if (element.Patterns.ExpandCollapse.TryGetPattern(out var expand))
@@ -316,7 +268,7 @@ namespace DesktopMcpServer
                 {
                     if (wantChecked && checkbox.IsChecked != true) checkbox.IsChecked = true;
                     else if (!wantChecked && checkbox.IsChecked != false) checkbox.IsChecked = false;
-                    return $"Checkbox '{fieldName}' set to {(wantChecked ? "Checked" : "Unchecked")}";
+                    return $"Checkbox set to {(wantChecked ? "Checked" : "Unchecked")}";
                 }
                 
                 if (element.Patterns.Toggle.TryGetPattern(out var toggle))
@@ -325,8 +277,7 @@ namespace DesktopMcpServer
                     else if (!wantChecked && toggle.ToggleState.Value == ToggleState.On) toggle.Toggle();
                     return $"Toggled '{fieldName}'";
                 }
-
-                return "Error: Element does not support Checkbox/Toggle pattern";
+                return "Error: Element is not a checkbox/toggle.";
             }
             catch (Exception ex) { return $"Error setting checkbox: {ex.Message}"; }
         }
@@ -351,7 +302,7 @@ namespace DesktopMcpServer
                     return $"Selected radio: {element.Name ?? fieldName}";
                 }
                 
-                element.Click();
+                element.Click(); 
                 return $"Clicked radio: {element.Name ?? fieldName}";
             }
             catch (Exception ex) { return $"Error selecting radio: {ex.Message}"; }
@@ -363,15 +314,17 @@ namespace DesktopMcpServer
             {
                 var waitTime = TimeSpan.FromSeconds(timeoutSeconds);
 
+                // Scenario 1: Wait for Window Only
                 if (string.IsNullOrEmpty(fieldName))
                 {
-                    if (string.IsNullOrEmpty(windowName)) return "Error: Must provide at least fieldName or windowName.";
+                    if (string.IsNullOrEmpty(windowName)) return "Error: Must provide windowName.";
                     var window = Retry.WhileNull(() => FindWindow(windowName), waitTime).Result;
                     return window != null 
                         ? $"Found window '{windowName}'." 
                         : $"Timeout: Window '{windowName}' not found.";
                 }
 
+                // Scenario 2: Wait for Element
                 var element = Retry.WhileNull(() =>
                 {
                     var root = FindWindow(windowName);
@@ -403,8 +356,8 @@ namespace DesktopMcpServer
             
             return Retry.WhileNull(() => 
             {
+                // 1. Fuzzy Search (Top-Level Only - Fast)
                 var topLevelWindows = desktop.FindAllChildren();
-                
                 foreach (var win in topLevelWindows)
                 {
                     var title = GetSafeProperty(() => win.Name);
@@ -425,6 +378,12 @@ namespace DesktopMcpServer
                     catch { }
                 }
 
+                // 2. Exact Deep Search (Fallback - Slow but Reliable for Child Dialogs)
+                // This fixes "Connect to Server" not being found because it is a child of the main window
+                var deepMatch = desktop.FindFirstDescendant(cf => cf.ByName(windowName));
+                if (deepMatch != null) return deepMatch;
+
+                // 3. Control Type Fallback
                 if (Enum.TryParse<ControlType>(windowName, true, out var type))
                 {
                      return desktop.FindFirstDescendant(cf => cf.ByControlType(type));
@@ -440,40 +399,54 @@ namespace DesktopMcpServer
             if (root == null) return null;
 
             Wait.UntilInputIsProcessed(); 
-
-            return Retry.WhileNull(() => SmartFindElementInTree(root, fieldName), 
-                                   _elementSearchTimeout).Result;
+            return Retry.WhileNull(() => SmartFindElementInTree(root, fieldName), _elementSearchTimeout).Result;
         }
 
         private AutomationElement? SmartFindElementInTree(AutomationElement root, string fieldName)
         {
+            var cf = _automation.ConditionFactory;
+
             // 1. Exact ID
-            var el = root.FindFirstDescendant(cf => cf.ByAutomationId(fieldName));
+            var el = root.FindFirstDescendant(cf.ByAutomationId(fieldName));
             if (el != null) return el;
 
             // 2. Exact Name
-            el = root.FindFirstDescendant(cf => cf.ByName(fieldName));
+            el = root.FindFirstDescendant(cf.ByName(fieldName));
             if (el != null) return el;
 
-            // 3. Partial Name Match (Fuzzy Fallback)
+            // 3. Case Insensitive Name (Using PropertyCondition directly for fuzzy match)
+            try {
+                var nameCond = new PropertyCondition(_automation.PropertyLibrary.Element.Name, fieldName, PropertyConditionFlags.IgnoreCase);
+                el = root.FindFirstDescendant(nameCond);
+                if (el != null) return el;
+            } catch {}
+
+            // 4. Partial Match (SAFE)
+            // Only scans logical elements to avoid timeouts. Fixes "_New Query" vs "New Query"
             try 
-            {                
-                // This gets all descendants so we can filter in memory
-                var all = root.FindAllDescendants(); 
-                el = all.FirstOrDefault(e => e.Name != null && 
-                                           e.Name.Contains(fieldName, StringComparison.OrdinalIgnoreCase));
+            {
+                var typeCond = cf.ByControlType(ControlType.Button)
+                    .Or(cf.ByControlType(ControlType.Edit))
+                    .Or(cf.ByControlType(ControlType.Text))
+                    .Or(cf.ByControlType(ControlType.Document))
+                    .Or(cf.ByControlType(ControlType.MenuItem))
+                    .Or(cf.ByControlType(ControlType.TreeItem))
+                    .Or(cf.ByControlType(ControlType.ListItem))
+                    .Or(cf.ByControlType(ControlType.CheckBox));
+                
+                var candidates = root.FindAllDescendants(typeCond);
+                el = candidates.FirstOrDefault(e => e.Name != null && e.Name.Contains(fieldName, StringComparison.OrdinalIgnoreCase));
                 if (el != null) return el;
             }
             catch {}
 
-            // 4. Class Name
-            el = root.FindFirstDescendant(cf => cf.ByClassName(fieldName));
+            // 5. Class/Role
+            el = root.FindFirstDescendant(cf.ByClassName(fieldName));
             if (el != null) return el;
 
-            // 5. Control Type (Role)
             if (Enum.TryParse<ControlType>(fieldName, true, out var type))
             {
-                el = root.FindFirstDescendant(cf => cf.ByControlType(type));
+                el = root.FindFirstDescendant(cf.ByControlType(type));
                 if (el != null) return el;
             }
 
@@ -503,7 +476,6 @@ namespace DesktopMcpServer
 
                         if (cType == ControlType.Pane.ToString() && string.IsNullOrEmpty(cName) && string.IsNullOrEmpty(cId))
                             continue;
-
                         node.Children.Add(BuildSimplifiedTree(child, currentDepth + 1, maxDepth));
                     }
                 }
