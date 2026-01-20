@@ -57,3 +57,4 @@ Ideas Help:
 2. https://learn.microsoft.com/en-us/nuget/concepts/nuget-mcp-server
 3. https://github.com/FlaUI/FlaUI
 4. https://github.com/microsoft/WPF-Samples/tree/main
+5. https://github.com/FlaUI/FlaUInspect

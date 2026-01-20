@@ -114,8 +114,7 @@ namespace DesktopMcpServer
                 var element = SmartFindElement(fieldName, windowName);
                 if (element == null) return $"Error: Element not found '{fieldName}' in window '{windowName ?? "Current"}'";
 
-                //Adding logic to improve reliability of clicks
-                // FIX 1: Handle Offscreen Elements (e.g. at bottom of a list)
+                // Handle Offscreen Elements
                 if (element.IsOffscreen)
                 {
                     if (element.Patterns.ScrollItem.TryGetPattern(out var scrollPattern))
@@ -124,26 +123,21 @@ namespace DesktopMcpServer
                     }
                 }
 
-                // FIX 2: Wait for Animation (e.g. Combobox sliding down)
-                // This prevents clicking "air" while the UI is still fading in
-                try 
-                { 
-                    element.WaitUntilClickable(TimeSpan.FromSeconds(2)); 
-                } 
-                catch {}
+                try { element.WaitUntilClickable(TimeSpan.FromSeconds(2)); } catch {}
 
-                // FIX 3: Ensure Focus
-                element.SetForeground();
-
+                // STRATEGY 1: Background (Invoke Pattern)
                 if (element.Patterns.Invoke.TryGetPattern(out var invokePattern))
                 {
                     invokePattern.Invoke();
-                    return $"Successfully invoked: {fieldName}";
+                    return $"Successfully invoked: {fieldName} (Background/Pattern)";
                 }
+
+                // STRATEGY 2: Foreground (Physical Mouse Click)
+                element.SetForeground();
                 element.Click();
-                return $"Successfully clicked: {fieldName}";
+                return $"Successfully clicked: {fieldName} (Foreground/Mouse)";
             }
-            catch (Exception ex) { return $"Error clicking: {ex.Message}"; }
+            catch (Exception ex) { return $"Error clicking element: {ex.Message}"; }
         }
 
         public string RightClickElement(string fieldName, string? windowName = null)
@@ -151,9 +145,33 @@ namespace DesktopMcpServer
             try
             {
                 var element = SmartFindElement(fieldName, windowName);
-                if (element == null) return $"Error: Element not found '{fieldName}'";
+                if (element == null) return $"Error: Element not found '{fieldName}' in window '{windowName ?? "Current"}'";
+
+                // STEP 1: Handle Offscreen (Defensive)
+                // If the element is hidden in a list, scroll it into view first
+                if (element.IsOffscreen)
+                {
+                    if (element.Patterns.ScrollItem.TryGetPattern(out var scrollPattern))
+                    {
+                        scrollPattern.ScrollIntoView();
+                    }
+                }
+
+                // STEP 2: Wait for UI (Defensive)
+                // Ensure the element is actually ready to receive input
+                try { element.WaitUntilClickable(TimeSpan.FromSeconds(2)); } catch {}
+
+                // STEP 3: Foreground & Click (Physical)
+                // There is no "RightClickPattern", so we must use physical input simulation.
+                // We force focus first to ensure the context menu appears on top.
+                element.SetForeground();
                 element.RightClick();
-                return $"Right-clicked: {fieldName}";
+                
+                // Optional: Wait a tiny bit for the Context Menu to actually fade in
+                Wait.UntilInputIsProcessed();
+                Thread.Sleep(200);
+
+                return $"Successfully right-clicked: {fieldName}";
             }
             catch (Exception ex) { return $"Error right-clicking: {ex.Message}"; }
         }
@@ -165,24 +183,51 @@ namespace DesktopMcpServer
                 var element = SmartFindElement(fieldName, windowName);
                 if (element == null) return $"Error: Element not found '{fieldName}'";
 
+                // STRATEGY 1: Background (Value Pattern) - PREFERRED
+                // This sets text directly in memory. It prevents "Enter" triggers and works in background.
+                // We only use this if we don't have special keys (which imply keyboard interaction).
+                if (string.IsNullOrEmpty(specialKeys) && !string.IsNullOrEmpty(value))
+                {
+                    if (element.Patterns.Value.TryGetPattern(out var valuePattern))
+                    {
+                        if (valuePattern.IsReadOnly.Value) 
+                            return $"Error: Field '{fieldName}' is read-only.";
+
+                        valuePattern.SetValue(value);
+                        return $"Successfully set text to '{value}' (Background/Pattern).";
+                    }
+                }
+
+                // STRATEGY 2: Foreground (Input Simulation) - FALLBACK
                 element.SetForeground();
                 element.Focus();
                 Wait.UntilInputIsProcessed(); 
 
+                // Send Special Keys (using helper)
                 if (!string.IsNullOrEmpty(specialKeys))
                 {
-                    Keyboard.Type(specialKeys);
+                    string netKeys = TranslateKeys(specialKeys);
+                    System.Windows.Forms.SendKeys.SendWait(netKeys);
                     Wait.UntilInputIsProcessed();
                 }
 
+                // Type the value (if Strategy 1 failed)
                 if (!string.IsNullOrEmpty(value))
                 {
-                    if (element.Patterns.Value.TryGetPattern(out var valuePattern))
+                    // Try ValuePattern again (sometimes focus helps)
+                     if (element.Patterns.Value.TryGetPattern(out var valuePattern) && !valuePattern.IsReadOnly.Value)
+                    {
                         valuePattern.SetValue(value);
+                    }
                     else
+                    {
+                        // Fallback: Human-like typing
+                        // Note: If value contains '~', SendKeys treats it as Enter. Keyboard.Type treats it literal.
                         Keyboard.Type(value);
+                    }
                 }
-                return $"Wrote to '{fieldName}'.";
+
+                return $"Successfully wrote to '{fieldName}' (Foreground/Focus).";
             }
             catch (Exception ex) { return $"Error writing text: {ex.Message}"; }
         }
@@ -303,7 +348,7 @@ namespace DesktopMcpServer
             catch (Exception ex) { return $"Error typing: {ex.Message}"; }
         }
 
-        public string SelectItems(string fieldName, string value, string? windowName = null)
+public string SelectItems(string fieldName, string value, string? windowName = null)
         {
             try
             {
@@ -313,30 +358,32 @@ namespace DesktopMcpServer
                 var itemNames = value.Split(',').Select(i => i.Trim()).ToList();
                 var successLog = new List<string>();
 
-                var comboBox = element.AsComboBox();
-                if (comboBox != null && itemNames.Count == 1)
+                // STRATEGY 1: Value Pattern (Background)
+                // Modern combos allow setting the value directly (e.g. "Windows Authentication") 
+                // without expanding the dropdown. This is instant and invisible.
+                if (itemNames.Count == 1)
                 {
-                    //comboBox.Select(itemNames[0]);
-                    //return $"Selected: {itemNames[0]}";
-                    // FIX: Ensure we wait after expanding, or use the pattern directly if collapsed
-                    if (comboBox.Patterns.ExpandCollapse.TryGetPattern(out var expandPattern) &&
-                        expandPattern.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
+                    if (element.Patterns.Value.TryGetPattern(out var valuePattern) && !valuePattern.IsReadOnly.Value)
                     {
-                        expandPattern.Expand();
-                        Thread.Sleep(500); // FIX: Wait for animation to finish opening
+                        try 
+                        {
+                            valuePattern.SetValue(itemNames[0]);
+                            // Verification check
+                            if (valuePattern.Value.Value == itemNames[0])
+                                return $"Selected (via Value Pattern): {itemNames[0]}";
+                        }
+                        catch {}
                     }
-                    
-                    var item = comboBox.Select(itemNames[0]);
-                    return $"Selected dropdown item: {itemNames[0]}";
                 }
 
+                // STRATEGY 2: Expand & Select (Background-ish)
+                // Does not steal focus, but works with UI logic.
                 if (element.Patterns.ExpandCollapse.TryGetPattern(out var expand))
                 {
                     if (expand.ExpandCollapseState.Value == ExpandCollapseState.Collapsed)
                     {
                         expand.Expand();
-                        // FIX: Explicit pause to allow the dropdown list to render visually
-                        Thread.Sleep(500);
+                        Thread.Sleep(500); // Wait for render
                         Wait.UntilInputIsProcessed();
                     }
                 }
@@ -344,15 +391,14 @@ namespace DesktopMcpServer
                 foreach (var name in itemNames)
                 {
                     var child = SmartFindElementInTree(element, name);
-                    //if (child != null && child.Patterns.SelectionItem.TryGetPattern(out var selItem))
-                    //{
-                    //    if (itemNames.Count > 1) selItem.AddToSelection();
-                    //    else selItem.Select();
-                    //    successLog.Add(name);
-                    //}
+                    
                     if (child != null)
                     {
-                        // Try selection pattern first (more reliable than clicking)
+                        // Scroll if needed (Background)
+                        if (child.IsOffscreen && child.Patterns.ScrollItem.TryGetPattern(out var scroll))
+                            scroll.ScrollIntoView();
+
+                        // Try Selection Pattern (Background)
                         if (child.Patterns.SelectionItem.TryGetPattern(out var selItem))
                         {
                             if (itemNames.Count > 1) selItem.AddToSelection();
@@ -361,19 +407,15 @@ namespace DesktopMcpServer
                         }
                         else
                         {
-                            // Fallback to click, but verify visibility
+                            // Fallback: Physical Click (Foreground)
                             child.SetForeground();
                             child.Click();
                             successLog.Add(name);
                         }
-                        // Small pause between multiple selections
                         Thread.Sleep(200); 
                     }
                     else
                     {
-                         // If not found, it might be off-screen (virtualized). 
-                         // Try sending a "Down" key to scroll, then look again? 
-                         // For now, just log failure.
                          return $"Error: Item '{name}' not found in list.";
                     }
                 }
@@ -391,21 +433,27 @@ namespace DesktopMcpServer
 
                 bool wantChecked = value.ToLower() is "on" or "true" or "checked" or "yes";
                 
+                // STRATEGY 1: CheckBox Wrapper (Background)
                 var checkbox = element.AsCheckBox();
                 if (checkbox != null)
                 {
                     if (wantChecked && checkbox.IsChecked != true) checkbox.IsChecked = true;
                     else if (!wantChecked && checkbox.IsChecked != false) checkbox.IsChecked = false;
-                    return $"Checkbox set to {(wantChecked ? "Checked" : "Unchecked")}";
+                    return $"Checkbox set to {(wantChecked ? "Checked" : "Unchecked")} (Pattern)";
                 }
                 
+                // STRATEGY 2: Toggle Pattern (Background)
                 if (element.Patterns.Toggle.TryGetPattern(out var toggle))
                 {
                     if (wantChecked && toggle.ToggleState.Value != ToggleState.On) toggle.Toggle();
                     else if (!wantChecked && toggle.ToggleState.Value == ToggleState.On) toggle.Toggle();
-                    return $"Toggled '{fieldName}'";
+                    return $"Toggled '{fieldName}' (Pattern)";
                 }
-                return "Error: Element is not a checkbox/toggle.";
+
+                // STRATEGY 3: Click (Foreground Fallback)
+                element.SetForeground();
+                element.Click();
+                return "Toggled via Click (Fallback)";
             }
             catch (Exception ex) { return $"Error setting checkbox: {ex.Message}"; }
         }
@@ -416,6 +464,7 @@ namespace DesktopMcpServer
             {
                 var element = SmartFindElement(fieldName, windowName);
                 
+                // Logic to find child in group
                 if (element != null && !string.IsNullOrEmpty(value) && !(value.ToLower() is "on" or "true"))
                 {
                      var childOption = SmartFindElementInTree(element, value);
@@ -424,14 +473,17 @@ namespace DesktopMcpServer
 
                 if (element == null) return $"Error: Radio element not found '{fieldName}'";
 
+                // STRATEGY 1: Selection Pattern (Background)
                 if (element.Patterns.SelectionItem.TryGetPattern(out var selectionPattern))
                 {
                     selectionPattern.Select();
-                    return $"Selected radio: {element.Name ?? fieldName}";
+                    return $"Selected radio: {element.Name ?? fieldName} (Pattern)";
                 }
                 
+                // STRATEGY 2: Click (Foreground)
+                element.SetForeground();
                 element.Click(); 
-                return $"Clicked radio: {element.Name ?? fieldName}";
+                return $"Clicked radio: {element.Name ?? fieldName} (Mouse)";
             }
             catch (Exception ex) { return $"Error selecting radio: {ex.Message}"; }
         }
