@@ -31,7 +31,8 @@ namespace DesktopMcpServer
         {
             try
             {
-                if (_currentApp != null && !_currentApp.HasExited) CloseApp();
+                //removing logic to allow multiple apps to be launched
+                //if (_currentApp != null && !_currentApp.HasExited) CloseApp();
 
                 _currentApp = FlaUI.Core.Application.Launch(path);
                 
@@ -202,12 +203,60 @@ namespace DesktopMcpServer
             catch (Exception ex) { return $"Error reading text: {ex.Message}"; }
         }
 
+        // 1. The Helper Method (Translates "CTRL+V" -> "^v")
+        private string TranslateKeys(string keys)
+        {
+            if (string.IsNullOrEmpty(keys)) return "";
+
+            string input = keys.ToUpper().Trim();
+
+            // Handle Modifiers
+            input = input.Replace("CTRL+", "^");
+            input = input.Replace("ALT+", "%");
+            input = input.Replace("SHIFT+", "+");
+            
+            // Handle Keywords
+            var specialMap = new Dictionary<string, string>
+            {
+                { "ENTER", "{ENTER}" },
+                { "TAB", "{TAB}" },
+                { "BS", "{BACKSPACE}" },
+                { "BACKSPACE", "{BACKSPACE}" },
+                { "DEL", "{DELETE}" },
+                { "DELETE", "{DELETE}" },
+                { "ESC", "{ESC}" },
+                { "DOWN", "{DOWN}" },
+                { "UP", "{UP}" },
+                { "LEFT", "{LEFT}" },
+                { "RIGHT", "{RIGHT}" },
+                { "HOME", "{HOME}" },
+                { "END", "{END}" },
+                { "PGUP", "{PGUP}" },
+                { "PGDN", "{PGDN}" },
+                { "F5", "{F5}" },
+                { "F6", "{F6}" },
+                { "F7", "{F7}" },
+                { "F8", "{F8}" },
+                { "F9", "{F9}" },
+                { "F10", "{F10}" },
+                { "F11", "{F11}" },
+                { "F12", "{F12}" },
+            };
+
+            if (specialMap.ContainsKey(input)) return specialMap[input];
+            // 4. Handle Case: CTRL +C -> "^C" is valid, but lower case "c" is safer for some apps
+            return input;
+        }
+
+        // 2. The Tool (Uses the Helper + Focuses Window)
         public string SendSpecialKeys(string specialKeys, string? windowName = null)
         {
             try
             {
-                //Keyboard.Type(specialKeys);
-                // FIX: If windowName is provided, find and focus it FIRST
+                // Translate: "CTRL+V" becomes "^V"
+                string netKeys = TranslateKeys(specialKeys);
+
+                // Focus logic
                 if (!string.IsNullOrEmpty(windowName))
                 {
                     var window = FindWindow(windowName);
@@ -216,18 +265,18 @@ namespace DesktopMcpServer
                         window.SetForeground();
                         window.Focus();
                         Wait.UntilInputIsProcessed();
-                        Thread.Sleep(200); // Small pause for OS focus switch
+                        Thread.Sleep(200); 
                     }
                     else
                     {
-                        return $"Error: Target window '{windowName}' not found for sending keys.";
+                        return $"Error: Target window '{windowName}' not found.";
                     }
                 }
 
-                // Use Windows Forms SendKeys to support codes like "{ENTER}", "^a"
-                System.Windows.Forms.SendKeys.SendWait(specialKeys);
+                // Send the translated keys
+                System.Windows.Forms.SendKeys.SendWait(netKeys);
                 Wait.UntilInputIsProcessed();
-                return $"Sent keys: {specialKeys}";
+                return $"Sent keys: {netKeys} (Original: {specialKeys})";
             }
             catch (Exception ex) { return $"Error sending keys: {ex.Message}"; }
         }
@@ -387,7 +436,7 @@ namespace DesktopMcpServer
             catch (Exception ex) { return $"Error selecting radio: {ex.Message}"; }
         }
 
-        public string WaitForElement(string fieldName, string? windowName = null, int timeoutSeconds = 20)
+        public string WaitForElement(string? fieldName, string? windowName = null, int timeoutSeconds = 20)
         {
             try
             {

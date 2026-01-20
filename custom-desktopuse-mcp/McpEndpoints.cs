@@ -34,7 +34,7 @@ namespace DesktopMcpServer
         // Tool: WaitForElement
         [McpServerTool(Name = "WaitForElement")]
         [Description("Waits for a window or element to appear. Useful for long-loading screens. Default timeout is 20s.")]
-        public static string WaitForElement(string fieldName, string? windowName, int timeoutSeconds, DesktopAutomationService service)
+        public static string WaitForElement(string? windowName, string? fieldName, int timeoutSeconds, DesktopAutomationService service)
         {
             // If agent sends 0 or negative, default to 20s
             if (timeoutSeconds <= 0) timeoutSeconds = 20; 

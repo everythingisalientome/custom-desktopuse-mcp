@@ -68,3 +68,6 @@ yarn-error.log
 *.orig
 *.DS_Store
 Thumbs.db
+
+*.sql
+action.json

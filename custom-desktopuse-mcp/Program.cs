@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using Microsoft.Extensions.Logging;
 
 namespace DesktopMcpServer
 {
@@ -11,6 +12,13 @@ namespace DesktopMcpServer
         static async Task Main(string[] args)
         {
             var builder = Host.CreateApplicationBuilder(args);
+
+            //Clear default Logging Providers
+            builder.Logging.ClearProviders();
+
+            //Add custom File Logger
+            string logFilePath = "Logs/DesktopMcpServer-.log";
+            builder.Logging.AddProvider(new FileLoggerProvider(logFilePath));
 
             //Register Service (Singleton)
             builder.Services.AddSingleton<DesktopAutomationService>();
