@@ -183,27 +183,55 @@ namespace DesktopMcpServer
                 var element = SmartFindElement(fieldName, windowName);
                 if (element == null) return $"Error: Element not found '{fieldName}'";
 
-                // STRATEGY 1: Background (Value Pattern) - PREFERRED
-                // This sets text directly in memory. It prevents "Enter" triggers and works in background.
-                // We only use this if we don't have special keys (which imply keyboard interaction).
+                // STRATEGY 1: Background (Value Pattern) - WITH VERIFICATION
+                // We attempt to set it, but we MUST verify if the app actually listened.
                 if (string.IsNullOrEmpty(specialKeys) && !string.IsNullOrEmpty(value))
                 {
-                    if (element.Patterns.Value.TryGetPattern(out var valuePattern))
+                    if (element.Patterns.Value.TryGetPattern(out var valuePattern) && !valuePattern.IsReadOnly.Value)
                     {
-                        if (valuePattern.IsReadOnly.Value) 
-                            return $"Error: Field '{fieldName}' is read-only.";
+                        try
+                        {
+                            // 1. Try to Clear
+                            valuePattern.SetValue(""); 
+                            Thread.Sleep(50);
 
-                        valuePattern.SetValue(value);
-                        return $"Successfully set text to '{value}' (Background/Pattern).";
+                            // 2. VERIFY: Did it actually clear?
+                            // If the text is still there, this strategy FAILED.
+                            // We throw to exit this block and trigger Strategy 2.
+                            if (!string.IsNullOrEmpty(valuePattern.Value.Value))
+                            {
+                                throw new Exception("Silent Failure: SetValue('') was ignored by the app.");
+                            }
+
+                            // 3. Try to Set New Value
+                            valuePattern.SetValue(value);
+                            Thread.Sleep(50);
+
+                            // 4. VERIFY: Did it actually write?
+                            if (valuePattern.Value.Value != value)
+                            {
+                                throw new Exception("Silent Failure: SetValue(value) did not match.");
+                            }
+
+                            return $"Successfully set text to '{value}' (Background/Pattern).";
+                        }
+                        catch 
+                        {
+                            // Silent swallow: If ANY verification above failed, we just fall through 
+                            // to Strategy 2 (Foreground) below.
+                        }
                     }
                 }
 
-                // STRATEGY 2: Foreground (Input Simulation) - FALLBACK
+                // STRATEGY 2: Foreground (Manual Selection) - FALLBACK
+                // We are here because Strategy 1 either threw an error OR failed verification.
+                
                 element.SetForeground();
-                element.Focus();
+                element.Click();
                 Wait.UntilInputIsProcessed(); 
+                Thread.Sleep(200);// Small pause to let UI react to the click
 
-                // Send Special Keys (using helper)
+                // Step A: Send Special Keys (if any)
                 if (!string.IsNullOrEmpty(specialKeys))
                 {
                     string netKeys = TranslateKeys(specialKeys);
@@ -211,20 +239,26 @@ namespace DesktopMcpServer
                     Wait.UntilInputIsProcessed();
                 }
 
-                // Type the value (if Strategy 1 failed)
+                // Step B: Clean & Write (Manual Logic)
                 if (!string.IsNullOrEmpty(value))
                 {
-                    // Try ValuePattern again (sometimes focus helps)
-                     if (element.Patterns.Value.TryGetPattern(out var valuePattern) && !valuePattern.IsReadOnly.Value)
-                    {
-                        valuePattern.SetValue(value);
-                    }
-                    else
-                    {
-                        // Fallback: Human-like typing
-                        // Note: If value contains '~', SendKeys treats it as Enter. Keyboard.Type treats it literal.
-                        Keyboard.Type(value);
-                    }
+                    // FIX: "Home + Shift-End + Delete" works where "Ctrl+A" fails
+                    
+                    // 1. Move to start of line
+                    System.Windows.Forms.SendKeys.SendWait("{HOME}"); 
+                    Wait.UntilInputIsProcessed();
+                    
+                    // 2. Select to end of line (Shift + End)
+                    // "+" means Shift in SendKeys syntax
+                    System.Windows.Forms.SendKeys.SendWait("+{END}"); 
+                    Wait.UntilInputIsProcessed();
+                    
+                    // 3. Delete the selection
+                    System.Windows.Forms.SendKeys.SendWait("{DELETE}");
+                    Wait.UntilInputIsProcessed();
+
+                    // 4. Type the new value
+                    Keyboard.Type(value);
                 }
 
                 return $"Successfully wrote to '{fieldName}' (Foreground/Focus).";
@@ -249,27 +283,43 @@ namespace DesktopMcpServer
         }
 
         // 1. The Helper Method (Translates "CTRL+V" -> "^v")
+        // 1. The Helper Method (Updated for Case Sensitivity)
         private string TranslateKeys(string keys)
         {
             if (string.IsNullOrEmpty(keys)) return "";
 
-            string input = keys.ToUpper().Trim();
+            // Normalize modifiers to a standard format first (to handle Ctrl+ vs CTRL+)
+            string cleanKeys = keys.Trim();
 
-            // Handle Modifiers
-            input = input.Replace("CTRL+", "^");
-            input = input.Replace("ALT+", "%");
-            input = input.Replace("SHIFT+", "+");
-            
-            // Handle Keywords
-            var specialMap = new Dictionary<string, string>
+            // We use a temporary placeholder to handle case-insensitive replacements
+            // carefully so we don't mess up the actual letter casing yet.
+
+            // 1. Identify Modifiers
+            bool hasCtrl = cleanKeys.Contains("CTRL+", StringComparison.OrdinalIgnoreCase) || cleanKeys.Contains("Control+", StringComparison.OrdinalIgnoreCase);
+            bool hasAlt = cleanKeys.Contains("ALT+", StringComparison.OrdinalIgnoreCase);
+            bool hasShift = cleanKeys.Contains("SHIFT+", StringComparison.OrdinalIgnoreCase);
+
+            // 2. Remove modifiers from string to isolate the "Key"
+            string temp = cleanKeys;
+            temp = System.Text.RegularExpressions.Regex.Replace(temp, "CTRL\\+", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            temp = System.Text.RegularExpressions.Regex.Replace(temp, "Control\\+", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            temp = System.Text.RegularExpressions.Regex.Replace(temp, "ALT\\+", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            temp = System.Text.RegularExpressions.Regex.Replace(temp, "SHIFT\\+", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            string mainKey = temp.Trim();
+
+            // 3. Handle Special Keywords (ENTER, TAB, etc.) - These MUST be Uppercase for the map
+            var specialMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "ENTER", "{ENTER}" },
+                { "RETURN", "{ENTER}" },
                 { "TAB", "{TAB}" },
                 { "BS", "{BACKSPACE}" },
                 { "BACKSPACE", "{BACKSPACE}" },
                 { "DEL", "{DELETE}" },
                 { "DELETE", "{DELETE}" },
                 { "ESC", "{ESC}" },
+                { "ESCAPE", "{ESC}" },
                 { "DOWN", "{DOWN}" },
                 { "UP", "{UP}" },
                 { "LEFT", "{LEFT}" },
@@ -278,43 +328,87 @@ namespace DesktopMcpServer
                 { "END", "{END}" },
                 { "PGUP", "{PGUP}" },
                 { "PGDN", "{PGDN}" },
-                { "F5", "{F5}" },
-                { "F6", "{F6}" },
-                { "F7", "{F7}" },
-                { "F8", "{F8}" },
-                { "F9", "{F9}" },
-                { "F10", "{F10}" },
-                { "F11", "{F11}" },
-                { "F12", "{F12}" },
+                { "F1", "{F1}" }, { "F2", "{F2}" }, { "F3", "{F3}" }, { "F4", "{F4}" },
+                { "F5", "{F5}" }, { "F6", "{F6}" }, { "F7", "{F7}" }, { "F8", "{F8}" },
+                { "F9", "{F9}" }, { "F10", "{F10}" }, { "F11", "{F11}" }, { "F12", "{F12}" }
             };
 
-            if (specialMap.ContainsKey(input)) return specialMap[input];
-            // 4. Handle Case: CTRL +C -> "^C" is valid, but lower case "c" is safer for some apps
-            return input;
+            if (specialMap.ContainsKey(mainKey))
+            {
+                mainKey = specialMap[mainKey];
+            }
+            else
+            {
+                // CRITICAL FIX: If it is a single letter, force Lowercase UNLESS Shift is requested.
+                // ^A = Ctrl+Shift+A
+                // ^a = Ctrl+A
+                if (mainKey.Length == 1 && char.IsLetter(mainKey[0]))
+                {
+                    if (!hasShift)
+                        mainKey = mainKey.ToLower();
+                    else
+                        mainKey = mainKey.ToUpper(); // If Shift is explicit, use Upper
+                }
+            }
+
+            // 4. Rebuild the string for SendKeys
+            string result = "";
+            if (hasShift) result += "+"; // SendKeys syntax for Shift
+            if (hasCtrl) result += "^";  // SendKeys syntax for Ctrl
+            if (hasAlt) result += "%";   // SendKeys syntax for Alt
+
+            result += mainKey;
+
+            return result;
         }
 
         // 2. The Tool (Uses the Helper + Focuses Window)
-        public string SendSpecialKeys(string specialKeys, string? windowName = null)
+        public string SendSpecialKeys(string specialKeys, string? windowName = null, string? fieldName = null)
         {
             try
             {
                 // Translate: "CTRL+V" becomes "^V"
                 string netKeys = TranslateKeys(specialKeys);
 
-                // Focus logic
                 if (!string.IsNullOrEmpty(windowName))
                 {
-                    var window = FindWindow(windowName);
-                    if (window != null)
+                    // CASE 1: Context-Specific Shortcut (Targeting a specific item)
+                    // Example: "Delete" on a specific table in Object Explorer
+                    if (!string.IsNullOrEmpty(fieldName))
                     {
-                        window.SetForeground();
-                        window.Focus();
+                        var element = SmartFindElement(fieldName, windowName);
+                        if (element == null) return $"Error: Element '{fieldName}' not found.";
+
+                        // ACTION: Physical Click to FORCE context on this item
+                        element.SetForeground();
+                        element.Click();
                         Wait.UntilInputIsProcessed();
-                        Thread.Sleep(200); 
+                        Thread.Sleep(200); // Small pause to let App highlight the item
                     }
+                    // CASE 2: Global Shortcut (Resetting Context)
+                    // Example: "CTRL+O" (Open File) - We must NOT be focused on a Project item
                     else
                     {
-                        return $"Error: Target window '{windowName}' not found.";
+                        var window = FindWindow(windowName);
+                        if (window == null) return $"Error: Target window '{windowName}' not found.";
+
+                        window.SetForeground();
+                        Wait.UntilInputIsProcessed();
+
+                        // ACTION: "Neutral Click" Strategy
+                        // We try to find the "Title Bar" and click it. 
+                        // This resets the focus to the Window Frame, clearing any specific item selection.
+                        var titleBar = window.FindFirstDescendant(cf => cf.ByControlType(ControlType.TitleBar));
+                        if (titleBar != null)
+                        {
+                            titleBar.Click();
+                        }
+                        else
+                        {
+                            // Fallback: If no TitleBar (rare), just Focus the window and hope for the best.
+                            window.Focus();
+                        }
+                        Thread.Sleep(200); // Pause to let focus reset
                     }
                 }
 
@@ -348,7 +442,7 @@ namespace DesktopMcpServer
             catch (Exception ex) { return $"Error typing: {ex.Message}"; }
         }
 
-public string SelectItems(string fieldName, string value, string? windowName = null)
+        public string SelectItems(string fieldName, string value, string? windowName = null)
         {
             try
             {
@@ -488,7 +582,7 @@ public string SelectItems(string fieldName, string value, string? windowName = n
             catch (Exception ex) { return $"Error selecting radio: {ex.Message}"; }
         }
 
-        public string WaitForElement(string? fieldName, string? windowName = null, int timeoutSeconds = 20)
+        public string WaitForElement(string? fieldName = null, string? windowName = null, int timeoutSeconds = 20)
         {
             try
             {
@@ -575,34 +669,79 @@ public string SelectItems(string fieldName, string value, string? windowName = n
 
         private AutomationElement? SmartFindElement(string fieldName, string? windowName = null)
         {
-            var root = FindWindow(windowName);
-            if (root == null) return null;
+            // RETRY LOOP: We retry the ENTIRE process (Window + Element) 
+            // This handles cases where the window handle changes (Splash Screen -> Main App)
+            // or if the UI is rebuilding itself.
+            return Retry.WhileNull(() =>
+            {
+                try
+                {
+                    // 1. Find the Window (Fresh every time)
+                    var root = FindWindow(windowName);
+                    if (root == null) return null; // Keep retrying until window appears
 
-            Wait.UntilInputIsProcessed(); 
-            return Retry.WhileNull(() => SmartFindElementInTree(root, fieldName), _elementSearchTimeout).Result;
+                    // 2. Search for the Element
+                    // We catch exceptions here because accessing 'root' can fail 
+                    // if the window closes mid-search.
+                    return SmartFindElementInTree(root, fieldName);
+                }
+                catch (Exception)
+                {
+                    // If Window died or Tree broke, ignore and RETRY.
+                    return null; 
+                }
+            }, 
+            timeout: _elementSearchTimeout, 
+            interval: TimeSpan.FromMilliseconds(500) // Poll every 500ms
+            ).Result;
         }
 
         private AutomationElement? SmartFindElementInTree(AutomationElement root, string fieldName)
         {
             var cf = _automation.ConditionFactory;
 
-            // 1. Exact ID
+            // 1. Exact ID (Best match)
             var el = root.FindFirstDescendant(cf.ByAutomationId(fieldName));
             if (el != null) return el;
 
-            // 2. Exact Name
+            // --- NEW: INTELLIGENT PRIORITIZATION ---
+            // 2. Exact Name + EDITABLE Control Type (Priority)
+            // This prevents finding the "Label" instead of the "Input Box" when they share the same name.
+            // We look for Edit, ComboBox, or Document controls first.
+            var editableCondition = cf.ByName(fieldName).And(
+                cf.ByControlType(ControlType.Edit)
+                .Or(cf.ByControlType(ControlType.ComboBox))
+                .Or(cf.ByControlType(ControlType.Document))
+            );
+            
+            el = root.FindFirstDescendant(editableCondition);
+            if (el != null) return el;
+            // ----------------------------------------
+
+            // 3. Exact Name (Fallback)
+            // If no editable control is found, we accept whatever we find (buttons, labels, etc.)
             el = root.FindFirstDescendant(cf.ByName(fieldName));
             if (el != null) return el;
 
-            // 3. Case Insensitive Name (Using PropertyCondition directly for fuzzy match)
+            // 4. Case Insensitive Name
             try {
                 var nameCond = new PropertyCondition(_automation.PropertyLibrary.Element.Name, fieldName, PropertyConditionFlags.IgnoreCase);
+                
+                // Try editable preference first for case-insensitive too
+                var editNameCond = new AndCondition(nameCond, 
+                     cf.ByControlType(ControlType.Edit)
+                    .Or(cf.ByControlType(ControlType.ComboBox))
+                    .Or(cf.ByControlType(ControlType.Document)));
+
+                el = root.FindFirstDescendant(editNameCond);
+                if (el != null) return el;
+
+                // Fallback to any control
                 el = root.FindFirstDescendant(nameCond);
                 if (el != null) return el;
             } catch {}
 
-            // 4. Partial Match (SAFE)
-            // Only scans logical elements to avoid timeouts. Fixes "_New Query" vs "New Query"
+            // 5. Partial Match (SAFE)
             try 
             {
                 var typeCond = cf.ByControlType(ControlType.Button)
@@ -620,7 +759,7 @@ public string SelectItems(string fieldName, string value, string? windowName = n
             }
             catch {}
 
-            // 5. Class/Role
+            // 6. Class/Role
             el = root.FindFirstDescendant(cf.ByClassName(fieldName));
             if (el != null) return el;
 
